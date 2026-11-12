@@ -40,16 +40,17 @@ def extrapolate_light():
     ga, gb, ha, hb = a['glyf'], b['glyf'], a['hmtx'], b['hmtx']
     for name in a.getGlyphOrder():
         x, y = ga[name], gb[name]
-        if x.isComposite() or x.numberOfContours != 0:
+        if x.isComposite():
+            for ca, cb in zip(x.components, y.components):
+                ca.x = round(ca.x - LIGHT_K * (cb.x - ca.x))
+                ca.y = round(ca.y - LIGHT_K * (cb.y - ca.y))
+            x.recalcBounds(ga)
+        elif x.numberOfContours != 0:
             ca, _, _ = x.getCoordinates(ga)
             cb, _, _ = y.getCoordinates(gb)
             new = [(round(p - LIGHT_K * (q - p)), round(r - LIGHT_K * (s - r)))
                    for (p, r), (q, s) in zip(ca, cb)]
-            if x.isComposite():
-                for i, comp in enumerate(x.components):
-                    comp.x, comp.y = new[i]
-            else:
-                x.coordinates = GlyphCoordinates(new[:len(x.coordinates)])
+            x.coordinates = GlyphCoordinates(new[:len(x.coordinates)])
             x.recalcBounds(ga)
         adv = max(0, round(ha[name][0] - LIGHT_K * (hb[name][0] - ha[name][0])))
         ha[name] = (adv, ga[name].xMin if ga[name].numberOfContours else 0)
