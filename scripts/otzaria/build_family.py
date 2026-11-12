@@ -94,6 +94,7 @@ def copy_shifted(font, src, dy=0):
 
 
 TRAIL_PAD = 50     # extra space between a word and a trailing . , : ; ! ? sof pasuq
+TICK_SLANT = 0.34  # shear of geresh/gershayim ticks
 BRACKET_PAD = 30   # extra space on each side of brackets
 
 
@@ -113,11 +114,32 @@ def pad_punctuation(font):
     for cp in (0x2e, 0x2c, 0x3a, 0x3b, 0x21, 0x3f, 0x5c3):
         adv, lsb = hmtx[c[cp]]
         hmtx[c[cp]] = (adv + TRAIL_PAD, lsb)
-    for cp in (0x28, 0x29, 0x5b, 0x5d, 0x7b, 0x7d):
+    # Space only on the side facing the bracketed text (RTL: the '(' glyph closes, ')' opens),
+    # so a bracket followed by a comma does not stack two paddings.
+    for cp in (0x28, 0x5b, 0x7b):
+        n = c[cp]
+        adv, lsb = hmtx[n]
+        hmtx[n] = (adv + BRACKET_PAD, lsb)
+    for cp in (0x29, 0x5d, 0x7d):
         n = c[cp]
         adv, lsb = hmtx[n]
         shift_glyph_x(font, n, BRACKET_PAD)
-        hmtx[n] = (adv + 2 * BRACKET_PAD, lsb + BRACKET_PAD)
+        hmtx[n] = (adv + BRACKET_PAD, lsb + BRACKET_PAD)
+
+
+def slant_ticks(font):
+    """Rashi-script geresh/gershayim are slanted ticks (top leaning right), not upright sticks."""
+    c = font.getBestCmap()
+    glyf = font['glyf']
+    for cp in (0x27, 0x5f3, 0x22, 0x5f4):
+        g = glyf[c[cp]]
+        if g.numberOfContours <= 0:
+            continue
+        g.recalcBounds(glyf)
+        ym = (g.yMin + g.yMax) / 2
+        g.coordinates = GlyphCoordinates(
+            [(round(x + TICK_SLANT * (y - ym)), y) for x, y in g.coordinates])
+        g.recalcBounds(glyf)
 
 
 def fix_spacing_and_punct(font):
@@ -146,6 +168,7 @@ def fix_spacing_and_punct(font):
         if cp not in c:
             add_glyph(font, cp, 'uni%04X' % cp, Glyph0(), adv)
     pad_punctuation(font)
+    slant_ticks(font)
 
 
 # ---------- niqqud / te'amim ----------
@@ -264,14 +287,11 @@ def letter_ink(font, name):
             cur = []
     X0, Y0, W, H = -300, -700, 1400, 2200
     sc = 0.25
-    ink = Image.new('1', (int(W * sc), int(H * sc)), 0)
-    holes = Image.new('1', ink.size, 0)
+    m = np.zeros((int(H * sc), int(W * sc)), bool)
     for ct in contours:
-        n = len(ct)
-        area = sum(ct[k][0] * ct[(k + 1) % n][1] - ct[(k + 1) % n][0] * ct[k][1] for k in range(n))
-        pts = [((x - X0) * sc, (H - (y - Y0)) * sc) for x, y in ct]
-        ImageDraw.Draw(holes if area > 0 else ink).polygon(pts, fill=1)
-    m = np.array(ink) & ~np.array(holes)
+        t = Image.new('1', (m.shape[1], m.shape[0]), 0)
+        ImageDraw.Draw(t).polygon([((x - X0) * sc, (H - (y - Y0)) * sc) for x, y in ct], fill=1)
+        m ^= np.array(t)   # even-odd: outer contours add, holes cancel, whatever the winding
     return m, X0, Y0, H, sc
 
 
@@ -385,6 +405,11 @@ def build_gpos(font, new_marks):
                 else:
                     y0, y1, y = T_BELOW_Y - h, T_BELOW_Y - 8, T_BELOW_Y
                 dx = clear_dx(inks[L], cx, hw, y0, y1)
+                lift = 0
+                while (not band_clear(inks[L], cx + dx - hw, cx + dx + hw, y0 + lift, y1 + lift)
+                       and abs(lift) < 400):
+                    lift += 20 if cls == 'above' else -20
+                y += lift
                 tdx[(L, cp)] = (cx + dx, y)
                 bases[L] = {CID[cls]: otl.buildAnchor(cx + dx, y)}
             subtables.append(otl.buildMarkBasePosSubtable({n: ma}, bases, gm))
