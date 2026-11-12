@@ -1,0 +1,16 @@
+# Flutter package that carries the Mekorot static weights for Otzaria.
+# Fonts live in lib/, so the app declares them as packages/otzaria_mekorot/<file>.
+name: otzaria_mekorot
+description: >-
+  Mekorot (Rashi-style Hebrew) in six static weights, with complete niqqud and
+  te'amim, for Otzaria.
+version: 1.2.0
+homepage: https://github.com/palmoni5/mekorot
+publish_to: "none"
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter

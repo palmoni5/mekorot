@@ -145,32 +145,38 @@ def glyph_bounds(font, name):
     return g.xMin, g.yMin, g.xMax, g.yMax
 
 
+TEAMIM_SCALE = 1.55
+BELOW_VOWELS = [0x5b0, 0x5b1, 0x5b2, 0x5b3, 0x5b4, 0x5b5, 0x5b6, 0x5b7, 0x5b8, 0x5bb, 0x5c7]
+ABOVE_VOWELS = [0x5b9, 0x5ba]
+REL_X = {0x5b9: 0.22, 0x5ba: 0.22, 0x5bb: 0.42, 0x5bd: 0.30}
+LEVEL_TOP = 700          # normal letters share one height level above
+LEVEL_BASE = -30         # ... and one level below
+
+
+def scale_glyph(font, name, k):
+    g = font['glyf'][name]
+    if g.numberOfContours > 0:
+        g.coordinates.scale((k, k))
+        g.recalcBounds(font['glyf'])
+
+
 def add_marks(font, wght):
-    noto = noto_instance(wght)
+    noto = noto_instance(wght + 250)
     c = font.getBestCmap()
-    spacing = {0x5c0, 0x5c6}          # paseq, nun hafukha: regular glyphs
+    spacing = {0x5c0, 0x5c6}
     new_marks = []
     for cp in range(0x591, 0x5c8):
-        if cp in c or cp in (0x5be, 0x5c3):
-            continue
-        if cp not in noto.getBestCmap():
+        if cp in c or cp in (0x5be, 0x5c3) or cp not in noto.getBestCmap():
             continue
         g, adv = noto_glyph_as_tt(noto, cp)
         name = 'uni%04X' % cp
         add_glyph(font, cp, name, g, adv if cp in spacing else 0)
         if cp not in spacing:
             new_marks.append(name)
-    # classify all marks (existing + new) by outline height
-    all_marks = [c[cp] for cp in range(0x591, 0x5c8)
-                 if cp in c and cp not in spacing and cp not in (0x5be, 0x5c3)]
-    cls = {}
-    for n in all_marks:
-        b = glyph_bounds(font, n)
-        if b is None:
-            continue
-        mid = (b[1] + b[3]) / 2
-        cls[n] = 'above' if mid > 250 else ('below' if mid < 60 else 'inside')
-    return new_marks, cls
+    for cp in range(0x591, 0x5b0):
+        if cp in c or ('uni%04X' % cp) in font['glyf']:
+            scale_glyph(font, font.getBestCmap().get(cp) or 'uni%04X' % cp, TEAMIM_SCALE)
+    return new_marks
 
 
 def build_mark_mark(marks, base_marks, gm):
@@ -191,61 +197,240 @@ def build_mark_mark(marks, base_marks, gm):
     return st
 
 
-def build_gpos(font, new_marks, cls):
+def letter_ink(font, name):
+    """Boolean ink mask of a glyph at 1/4 scale."""
+    from PIL import Image, ImageDraw
+    import numpy as np
+    gs = font.getGlyphSet()
+    rec = DecomposingRecordingPen(gs)
+    gs[name].draw(rec)
+    contours, cur, pos = [], [], None
+    for op, args in rec.value:
+        if op == 'moveTo':
+            cur = [args[0]]
+            pos = args[0]
+        elif op == 'lineTo':
+            cur.append(args[0])
+            pos = args[0]
+        elif op == 'qCurveTo':
+            offs = list(args[:-1])
+            end = args[-1]
+            p0 = pos
+            for k, o in enumerate(offs):
+                if k == len(offs) - 1:
+                    nxt = end
+                else:
+                    nxt = ((o[0] + offs[k + 1][0]) / 2, (o[1] + offs[k + 1][1]) / 2)
+                for t in range(1, 7):
+                    u = t / 6
+                    cur.append(((1 - u) ** 2 * p0[0] + 2 * (1 - u) * u * o[0] + u * u * nxt[0],
+                                (1 - u) ** 2 * p0[1] + 2 * (1 - u) * u * o[1] + u * u * nxt[1]))
+                p0 = nxt
+            pos = end
+        elif op in ('closePath', 'endPath'):
+            if len(cur) > 2:
+                contours.append(cur)
+            cur = []
+    X0, Y0, W, H = -300, -700, 1400, 2200
+    sc = 0.25
+    ink = Image.new('1', (int(W * sc), int(H * sc)), 0)
+    holes = Image.new('1', ink.size, 0)
+    for ct in contours:
+        n = len(ct)
+        area = sum(ct[k][0] * ct[(k + 1) % n][1] - ct[(k + 1) % n][0] * ct[k][1] for k in range(n))
+        pts = [((x - X0) * sc, (H - (y - Y0)) * sc) for x, y in ct]
+        ImageDraw.Draw(holes if area > 0 else ink).polygon(pts, fill=1)
+    m = np.array(ink) & ~np.array(holes)
+    return m, X0, Y0, H, sc
+
+
+def band_clear(ink, x0, x1, y0, y1):
+    m, X0, Y0, H, sc = ink
+    c0, c1 = int((x0 - X0) * sc), int((x1 - X0) * sc) + 1
+    r0, r1 = int((H - (y1 - Y0)) * sc), int((H - (y0 - Y0)) * sc) + 1
+    if c0 < 0 or r0 < 0:
+        return True
+    return not m[max(r0, 0):r1, max(c0, 0):c1].any()
+
+
+def clear_dx(ink, cx, hw, y0, y1):
+    for d in range(0, 400, 10):
+        for sgn in ((1, -1) if d else (1,)):
+            dx = sgn * d
+            if band_clear(ink, cx + dx - hw, cx + dx + hw, y0, y1):
+                return dx
+    return 0
+
+
+def build_gpos(font, new_marks):
     c = font.getBestCmap()
     gm = {n: i for i, n in enumerate(font.getGlyphOrder())}
     gpos = font['GPOS'].table
-    base_names = [c[cp] for cp in range(0x5d0, 0x5eb)]
-    # base-mark anchors on letters
-    bases = {}
-    for n in base_names:
-        b = glyph_bounds(font, n)
+    letters = [c[cp] for cp in range(0x5d0, 0x5eb)]
+    lb = {n: glyph_bounds(font, n) for n in letters}
+    inks = {n: letter_ink(font, n) for n in letters}
+
+    def level_above(b):
+        return (LEVEL_TOP if b[3] <= 720 else b[3]) + ABOVE_GAP
+
+    def level_below(b):
+        return (LEVEL_BASE - 70) if b[1] > -50 else (b[1] - 110)
+
+    T_ABOVE_Y = LEVEL_TOP + ABOVE_GAP
+    T_BELOW_Y = LEVEL_BASE - 70
+
+    t_above, t_below = [], []
+    for cp in list(range(0x591, 0x5b0)) + [0x5bf, 0x5c4, 0x5c5]:
+        if cp not in c:
+            continue
+        b = glyph_bounds(font, c[cp])
         if b is None:
             continue
-        xc = (b[0] + b[2]) // 2
-        bases[n] = {
-            CID['above']: otl.buildAnchor(xc, b[3] + ABOVE_GAP),
-            CID['below']: otl.buildAnchor(xc, min(b[1], 0) - BELOW_GAP),
-        }
-    marks = {}
-    for n in new_marks:
-        k = cls.get(n)
-        if k not in ('above', 'below'):
-            continue
+        (t_above if (b[1] + b[3]) / 2 > 250 else t_below).append(cp)
+    below_v = [cp for cp in BELOW_VOWELS if cp in c]
+    above_v = [cp for cp in ABOVE_VOWELS if cp in c]
+
+    def mark_info(cp, cls):
+        n = c[cp]
         b = glyph_bounds(font, n)
         xc = (b[0] + b[2]) // 2
-        marks[n] = (CID[k], otl.buildAnchor(xc, b[1] if k == 'above' else b[3]))
-    mb = otl.buildMarkBasePosSubtable(
-        {n: (k, a) for n, (k, a) in marks.items()}, bases, gm)
-    # mark-to-mark: any mark (existing or new) can carry a new mark
+        anchor = otl.buildAnchor(xc, b[1] if cls == 'above' else b[3])
+        return n, b, (CID[cls], anchor)
+
+    subtables = []
+    groups = {}
+    for cps, cls in ((below_v + [0x5bd], 'below'), (above_v, 'above')):
+        for cp in cps:
+            if cp not in c:
+                continue
+            n, b, ma = mark_info(cp, cls)
+            groups.setdefault(REL_X.get(cp, 0.5), {})[n] = ma
+    for rel, mk in sorted(groups.items()):
+        bases = {}
+        for n in letters:
+            b = lb[n]
+            x = round(b[0] + rel * (b[2] - b[0]))
+            bases[n] = {CID['above']: otl.buildAnchor(x, level_above(b)),
+                        CID['below']: otl.buildAnchor(x, level_below(b))}
+        subtables.append(otl.buildMarkBasePosSubtable(mk, bases, gm))
+    # te'amim: same height on every letter, nudged sideways only to clear the letter's own ink
+    for cps, cls in ((t_above, 'above'), (t_below, 'below')):
+        for cp in cps:
+            n, b, ma = mark_info(cp, cls)
+            hw = (b[2] - b[0]) // 2 + 15
+            h = b[3] - b[1]
+            bases = {}
+            for L in letters:
+                lbb = lb[L]
+                cx = (lbb[0] + lbb[2]) // 2
+                if cls == 'above':
+                    y0, y1, y = T_ABOVE_Y + 8, T_ABOVE_Y + h, T_ABOVE_Y
+                else:
+                    y0, y1, y = T_BELOW_Y - h, T_BELOW_Y - 8, T_BELOW_Y
+                dx = clear_dx(inks[L], cx, hw, y0, y1)
+                bases[L] = {CID[cls]: otl.buildAnchor(cx + dx, y)}
+            subtables.append(otl.buildMarkBasePosSubtable({n: ma}, bases, gm))
+
+    # mark-to-mark only between two te'amim on the same side
     mm_marks, mm_base = {}, {}
-    for n, k in cls.items():
-        if k not in ('above', 'below'):
-            continue
-        b = glyph_bounds(font, n)
-        xc = (b[0] + b[2]) // 2
-        if n in marks:
-            mm_marks[n] = marks[n]
-        mm_base[n] = {
-            CID['above']: otl.buildAnchor(xc, b[3] + STACK_GAP),
-            CID['below']: otl.buildAnchor(xc, b[1] - STACK_GAP),
-        }
+    for cps, cls in ((t_above, 'above'), (t_below, 'below')):
+        for cp in cps:
+            n, b, ma = mark_info(cp, cls)
+            mm_marks[n] = ma
+            xc = (b[0] + b[2]) // 2
+            y = b[3] + STACK_GAP if cls == 'above' else b[1] - STACK_GAP
+            mm_base.setdefault(n, {})[CID[cls]] = otl.buildAnchor(xc, y)
     mm = build_mark_mark(mm_marks, mm_base, gm)
+
     lookups = gpos.LookupList.Lookup
     i_mb = len(lookups)
-    lookups.append(otl.buildLookup([mb], flags=0))
+    lookups.append(otl.buildLookup(subtables, flags=0))
     i_mm = len(lookups)
     lookups.append(otl.buildLookup([mm], flags=0))
+
+    # vowel + te'am on the same side: the te'am goes to the right of the vowel, the vowel nudges left
+    gdef = font['GDEF'].table
+    sets = gdef.MarkGlyphSetsDef
+    single = {}
+    allm = sorted({c[cp] for cp in below_v + above_v + t_above + t_below}, key=lambda n: gm[n])
+
+    def shift_lookup(v):
+        if v not in single:
+            st = otl.buildSinglePosSubtable(
+                {n: otl.buildValue({'XPlacement': v}) for n in allm}, gm)
+            single[v] = len(lookups)
+            lookups.append(otl.buildLookup([st], flags=0))
+        return single[v]
+
+    def q(v):
+        return int(round(v / 20.0)) * 20
+
+    ctx_lookups = []
+    wgroups = {}
+    for L in letters:
+        w = lb[L][2] - lb[L][0]
+        wgroups.setdefault(int(round(w / 50.0)) * 50, []).append((L, w))
+    for vs, ts, side in ((below_v, t_below, 'below'), (above_v, t_above, 'above')):
+        sts = []
+        if side == 'below':
+            groups_ = [(None, 0)]
+        else:
+            groups_ = [(sorted(x[0] for x in g), sum(x[1] for x in g) / len(g))
+                       for g in wgroups.values()]
+        for gl, gw in groups_:
+            for v in vs:
+                bv = glyph_bounds(font, c[v])
+                wv = bv[2] - bv[0]
+                for t in ts:
+                    bt = glyph_bounds(font, c[t])
+                    wt = bt[2] - bt[0]
+                    need = (wv + wt) / 2 + 30
+                    need = max(0, need + (0.5 - REL_X.get(v, 0.5)) * (gw or 380))
+                    dv, dt = q(0.4 * need), -q(0.6 * need)
+                    if not dv and not dt:
+                        continue
+                    if gl is None:
+                        st = ot.ContextPos()
+                        st.Format = 3
+                        st.GlyphCount = 2
+                        st.Coverage = [otl.buildCoverage([c[v]], gm),
+                                       otl.buildCoverage([c[t]], gm)]
+                    else:
+                        st = ot.ChainContextPos()
+                        st.Format = 3
+                        st.BacktrackGlyphCount = 1
+                        st.BacktrackCoverage = [otl.buildCoverage(
+                            sorted(gl, key=lambda n: gm[n]), gm)]
+                        st.InputGlyphCount = 2
+                        st.InputCoverage = [otl.buildCoverage([c[v]], gm),
+                                            otl.buildCoverage([c[t]], gm)]
+                        st.LookAheadGlyphCount = 0
+                        st.LookAheadCoverage = []
+                    recs = []
+                    for idx, d in ((0, dv), (1, dt)):
+                        if d:
+                            r = ot.PosLookupRecord()
+                            r.SequenceIndex = idx
+                            r.LookupListIndex = shift_lookup(d)
+                            recs.append(r)
+                    st.PosLookupRecord = recs
+                    st.PosCount = len(recs)
+                    sts.append(st)
+        if sts:
+            cov = otl.buildCoverage(sorted({c[x] for x in vs + ts}, key=lambda n: gm[n]), gm)
+            sets.Coverage.append(cov)
+            sets.MarkSetCount = len(sets.Coverage)
+            ctx_lookups.append(len(lookups))
+            lookups.append(otl.buildLookup(sts, flags=0x10, markFilterSet=len(sets.Coverage) - 1))
     gpos.LookupList.LookupCount = len(lookups)
     for fr in gpos.FeatureList.FeatureRecord:
         if fr.FeatureTag == 'mark':
-            fr.Feature.LookupListIndex.append(i_mb)
+            fr.Feature.LookupListIndex += [i_mb] + ctx_lookups
             fr.Feature.LookupCount = len(fr.Feature.LookupListIndex)
         elif fr.FeatureTag == 'mkmk':
             fr.Feature.LookupListIndex.append(i_mm)
             fr.Feature.LookupCount = len(fr.Feature.LookupListIndex)
-    # GDEF: mark class
-    gd = font['GDEF'].table.GlyphClassDef.classDefs
+    gd = gdef.GlyphClassDef.classDefs
     for n in new_marks:
         gd[n] = 3
     for n in ('maqafhb', 'gereshhb', 'gershayimhb', 'sofpasuqhb', 'uni05C0', 'uni05C6'):
@@ -294,8 +479,8 @@ def build(style, wght, wclass):
         if t in font:
             del font[t]
     fix_spacing_and_punct(font)
-    new_marks, cls = add_marks(font, mark_w)
-    build_gpos(font, new_marks, cls)
+    new_marks = add_marks(font, mark_w)
+    build_gpos(font, new_marks)
     set_names(font, style, wclass)
     path = '%s/Mekorot-%s.ttf' % (OUT, style)
     font.save(path)
