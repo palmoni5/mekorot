@@ -92,6 +92,33 @@ def copy_shifted(font, src, dy=0):
     return g
 
 
+TRAIL_PAD = 50     # extra space between a word and a trailing . , : ; ! ? sof pasuq
+BRACKET_PAD = 30   # extra space on each side of brackets
+
+
+def shift_glyph_x(font, name, dx):
+    g = font['glyf'][name]
+    if g.numberOfContours > 0:
+        g.coordinates.translate((dx, 0))
+    elif g.isComposite():
+        for comp in g.components:
+            comp.x += dx
+    g.recalcBounds(font['glyf'])
+
+
+def pad_punctuation(font):
+    c = font.getBestCmap()
+    hmtx = font['hmtx']
+    for cp in (0x2e, 0x2c, 0x3a, 0x3b, 0x21, 0x3f, 0x5c3):
+        adv, lsb = hmtx[c[cp]]
+        hmtx[c[cp]] = (adv + TRAIL_PAD, lsb)
+    for cp in (0x28, 0x29, 0x5b, 0x5d, 0x7b, 0x7d):
+        n = c[cp]
+        adv, lsb = hmtx[n]
+        shift_glyph_x(font, n, BRACKET_PAD)
+        hmtx[n] = (adv + 2 * BRACKET_PAD, lsb + BRACKET_PAD)
+
+
 def fix_spacing_and_punct(font):
     c = font.getBestCmap()
     glyf, hmtx = font['glyf'], font['hmtx']
@@ -117,6 +144,7 @@ def fix_spacing_and_punct(font):
                     (0x2069, 0), (0x2002, 500), (0x2003, 1000), (0x2005, 250)):
         if cp not in c:
             add_glyph(font, cp, 'uni%04X' % cp, Glyph0(), adv)
+    pad_punctuation(font)
 
 
 # ---------- niqqud / te'amim ----------

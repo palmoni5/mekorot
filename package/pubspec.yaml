@@ -4,7 +4,7 @@ name: otzaria_mekorot
 description: >-
   Mekorot (Rashi-style Hebrew) in six static weights, with complete niqqud and
   te'amim, for Otzaria.
-version: 1.2.0
+version: 1.2.1
 homepage: https://github.com/palmoni5/mekorot
 publish_to: "none"
 
