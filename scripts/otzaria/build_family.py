@@ -201,10 +201,145 @@ TEAMIM_SCALE = 1.55
 BELOW_VOWELS = [0x5b0, 0x5b1, 0x5b2, 0x5b3, 0x5b4, 0x5b5, 0x5b6, 0x5b7, 0x5b8, 0x5bb, 0x5c7]
 ABOVE_VOWELS = [0x5b9, 0x5ba]
 REL_X = {0x5b9: 0.22, 0x5ba: 0.22, 0x5bb: 0.42, 0x5bd: 0.30}
+HOLAM_ON_LAMED = -0.25   # holam sits up-left of the lamed's ascender
 DOTS = [0x5c1, 0x5c2]
 SHIN = 'uni05E9'
 LEVEL_TOP = 700          # normal letters share one height level above
 LEVEL_BASE = -30         # ... and one level below
+
+
+VOWEL_GAP = 40      # minimum gap between below-vowels of neighbouring letters
+INK_PAD = 30       # clearance between a mark and the letter's own ink
+ROUND_R = 44        # corner radius of the Noto-derived marks, in font units
+ROUND_MIN_ANGLE = 30
+
+
+def _segments(contour):
+    """TrueType contour (list of (pt, on)) -> list of segments ('l', p0, p1) / ('q', p0, c, p1)."""
+    pts = list(contour)
+    # rotate so that we start on an on-curve point
+    k = next((i for i, (_, on) in enumerate(pts) if on), None)
+    if k is None:
+        return None
+    pts = pts[k:] + pts[:k]
+    segs = []
+    cur = pts[0][0]
+    i = 1
+    n = len(pts)
+    pend = []
+    for j in range(1, n + 1):
+        pt, on = pts[j % n]
+        if on:
+            if not pend:
+                segs.append(('l', cur, pt))
+            else:
+                offs = [q for q in pend]
+                for m, c in enumerate(offs):
+                    nxt = pt if m == len(offs) - 1 else ((c[0] + offs[m + 1][0]) / 2, (c[1] + offs[m + 1][1]) / 2)
+                    segs.append(('q', cur, c, nxt))
+                    cur = nxt
+                pend = []
+            cur = pt
+        else:
+            pend.append(pt)
+    return segs
+
+
+def _dir(a, b):
+    import math
+    d = math.hypot(b[0] - a[0], b[1] - a[1]) or 1
+    return ((b[0] - a[0]) / d, (b[1] - a[1]) / d)
+
+
+def _seg_len(sg):
+    import math
+    pts = [x for x in sg[1:]]
+    return sum(math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]) for i in range(len(pts) - 1))
+
+
+def _start_dir(sg):
+    return _dir(sg[1], sg[2])
+
+
+def _end_dir(sg):
+    return _dir(sg[-2], sg[-1])
+
+
+def _split(sg, t):
+    if sg[0] == 'l':
+        p0, p1 = sg[1], sg[2]
+        m = (p0[0] + (p1[0] - p0[0]) * t, p0[1] + (p1[1] - p0[1]) * t)
+        return ('l', p0, m), ('l', m, p1)
+    p0, c, p1 = sg[1], sg[2], sg[3]
+    a = (p0[0] + (c[0] - p0[0]) * t, p0[1] + (c[1] - p0[1]) * t)
+    b = (c[0] + (p1[0] - c[0]) * t, c[1] + (p1[1] - c[1]) * t)
+    m = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+    return ('q', p0, a, m), ('q', m, b, p1)
+
+
+def round_corners(font, name, r=ROUND_R):
+    """Soften sharp corners of a glyph with quadratic fillets (Noto marks are crisper than Mekorot)."""
+    import math
+    g = font['glyf'][name]
+    if g.numberOfContours <= 0:
+        return
+    coords, ends, flags = g.coordinates, g.endPtsOfContours, g.flags
+    pen = TTGlyphPen(None)
+    start = 0
+    for e in ends:
+        cont = [(tuple(coords[i]), bool(flags[i] & 1)) for i in range(start, e + 1)]
+        start = e + 1
+        segs = _segments(cont)
+        if not segs:
+            continue
+        n = len(segs)
+        # per junction: is it a corner
+        corner = []
+        for i in range(n):
+            a, b = _end_dir(segs[i]), _start_dir(segs[(i + 1) % n])
+            ang = math.degrees(math.acos(max(-1, min(1, a[0] * b[0] + a[1] * b[1]))))
+            corner.append(ang >= ROUND_MIN_ANGLE)
+        # trim segments at corners
+        trimmed = []
+        fill = []   # fillet after segment i (or None)
+        for i in range(n):
+            sg = segs[i]
+            L = _seg_len(sg) or 1
+            t0 = 0.0
+            t1 = 1.0
+            if corner[(i - 1) % n]:
+                t0 = min(0.45, r / L)
+            if corner[i]:
+                t1 = 1 - min(0.45, r / L)
+            if t1 < t0 + 0.05:
+                t0, t1 = 0.0, 1.0
+            if t0 > 0:
+                sg = _split(sg, t0)[1]
+                t1 = (t1 - t0) / (1 - t0)
+            if t1 < 1:
+                sg = _split(sg, t1)[0]
+            trimmed.append(sg)
+        # rebuild
+        first = trimmed[0]
+        pen.moveTo(first[1])
+        for i, sg in enumerate(trimmed):
+            if sg[0] == 'l':
+                pen.lineTo(sg[2])
+            else:
+                pen.qCurveTo(sg[2], sg[3])
+            nxt = trimmed[(i + 1) % n]
+            end = sg[-1]
+            if corner[i]:
+                # corner point = intersection region: use original junction as control
+                ctrl = segs[i][-1]
+                pen.qCurveTo(ctrl, nxt[1])
+            elif end != nxt[1]:
+                pen.lineTo(nxt[1])
+        pen.closePath()
+    ng = pen.glyph()
+    font['glyf'][name] = ng
+    ng.recalcBounds(font['glyf'])
+
 
 
 def scale_glyph(font, name, k):
@@ -230,6 +365,8 @@ def add_marks(font, wght):
     for cp in range(0x591, 0x5b0):
         if cp in c or ('uni%04X' % cp) in font['glyf']:
             scale_glyph(font, font.getBestCmap().get(cp) or 'uni%04X' % cp, TEAMIM_SCALE)
+    for n in new_marks:
+        round_corners(font, n)
     return new_marks
 
 
@@ -350,13 +487,18 @@ def build_gpos(font, new_marks):
         return (LEVEL_TOP if b[3] <= 720 else b[3]) + ABOVE_GAP
 
     def level_below(b):
-        return (LEVEL_BASE - 70) if b[1] > -50 else (b[1] - 110)
+        # one level for everyone; letters that dip just under the baseline (shin, samekh) get a
+        # small extra gap; real descenders (qof, final letters) keep the level and the vowel
+        # moves sideways instead (see the vowel-only rules below)
+        if b[1] > -75 or b[1] <= -250:
+            return LEVEL_BASE - 70
+        return b[1] - 25
 
     T_ABOVE_Y = LEVEL_TOP + ABOVE_GAP
     T_BELOW_Y = LEVEL_BASE - 70
 
     t_above, t_below = [], []
-    for cp in list(range(0x591, 0x5b0)) + [0x5bf, 0x5c4, 0x5c5]:
+    for cp in list(range(0x591, 0x5b0)) + [0x5bd, 0x5bf, 0x5c4, 0x5c5]:
         if cp not in c:
             continue
         b = glyph_bounds(font, c[cp])
@@ -376,7 +518,7 @@ def build_gpos(font, new_marks):
     subtables = []
     tdx = {}
     groups = {}
-    for cps, cls in ((below_v + [0x5bd], 'below'), (above_v, 'above')):
+    for cps, cls in ((below_v, 'below'), (above_v, 'above')):
         for cp in cps:
             if cp not in c:
                 continue
@@ -386,7 +528,8 @@ def build_gpos(font, new_marks):
         bases = {}
         for n in letters:
             b = lb[n]
-            x = round(b[0] + rel * (b[2] - b[0]))
+            r_eff = HOLAM_ON_LAMED if (n == 'uni05DC' and rel == REL_X[0x5b9]) else rel
+            x = round(b[0] + r_eff * (b[2] - b[0]))
             bases[n] = {CID['above']: otl.buildAnchor(x, level_above(b)),
                         CID['below']: otl.buildAnchor(x, level_below(b))}
         subtables.append(otl.buildMarkBasePosSubtable(mk, bases, gm))
@@ -474,7 +617,10 @@ def build_gpos(font, new_marks):
     def vowel_box(L, side, v):
         lbb = lb[L]
         bv = glyph_bounds(font, c[v])
-        vx = round(lbb[0] + REL_X.get(v, 0.5) * (lbb[2] - lbb[0]))
+        rel = REL_X.get(v, 0.5)
+        if L == 'uni05DC' and rel == REL_X[0x5b9]:
+            rel = HOLAM_ON_LAMED
+        vx = round(lbb[0] + rel * (lbb[2] - lbb[0]))
         if side == 'above':
             return bbox_at(bv, vx, level_above(lbb))
         return bbox_at(bv, vx, level_below(lbb) - (bv[3] - bv[1]))
@@ -491,13 +637,13 @@ def build_gpos(font, new_marks):
             nom_v, nom_t = 0.4 * need, -0.6 * need
         best = None
         for dt in range(-700, 501, 20):
-            if not band_clear(ink, tb[0] + dt - 14, tb[2] + dt + 14, tb[1], tb[3]):
+            if not band_clear(ink, tb[0] + dt - INK_PAD, tb[2] + dt + INK_PAD, tb[1], tb[3]):
                 continue
             if db is not None and y_near(tb, db) and not x_apart(tb, db, dt, 0):
                 continue
             for dv in (range(-300, 501, 20) if vb is not None else (0,)):
                 if vb is not None:
-                    if not band_clear(ink, vb[0] + dv - 14, vb[2] + dv + 14, vb[1], vb[3]):
+                    if not band_clear(ink, vb[0] + dv - INK_PAD, vb[2] + dv + INK_PAD, vb[1], vb[3]):
                         continue
                     if y_near(tb, vb) and not x_apart(tb, vb, dt, dv):
                         continue
@@ -511,6 +657,16 @@ def build_gpos(font, new_marks):
         if best is None:
             return 0, 0
         return q(best[1]), q(best[2])
+
+    def solve_v(L, v):
+        """Sideways nudge of a lone below-vowel clear of the letter's ink (descenders)."""
+        vb = vowel_box(L, 'below', v)
+        best = None
+        for dv in range(-400, 401, 20):
+            if band_clear(inks[L], vb[0] + dv - INK_PAD, vb[2] + dv + INK_PAD, vb[1], vb[3]):
+                if best is None or abs(dv) < abs(best):
+                    best = dv
+        return q(best) if best is not None else 0
 
     def solve_vd(L, v, dot):
         vb = vowel_box(L, 'above', v)
@@ -530,6 +686,11 @@ def build_gpos(font, new_marks):
                 combos.append((None, None, t))
                 for v in vs:
                     combos.append((v, None, t))
+            if side == 'below':
+                for v in vs:
+                    dv = solve_v(L, v)
+                    if dv:
+                        combos.append((v, None, None))
             if side == 'above' and L == SHIN:
                 for dot in DOTS:
                     for t in ts:
@@ -541,7 +702,9 @@ def build_gpos(font, new_marks):
             for v, dot, t in combos:
                 if v is None and dot is None:
                     continue
-                if t is None:
+                if t is None and dot is None:
+                    shifts = {v: solve_v(L, v)}
+                elif t is None:
                     shifts = {v: solve_vd(L, v, dot)}
                 else:
                     dv, dt = solve(L, side, v, dot, t)
@@ -556,7 +719,7 @@ def build_gpos(font, new_marks):
         sts = []
         for (seq, shifts), gl in sorted(rules.items(), key=lambda kv: -len(kv[0][0])):
             sh = dict(shifts)
-            if not any(x in DOTS for x in seq) and not any(sh.values()):
+            if side == 'above' and not any(x in DOTS for x in seq) and not any(sh.values()):
                 continue
             st = ot.ChainContextPos()
             st.Format = 3
@@ -586,10 +749,88 @@ def build_gpos(font, new_marks):
             sets.MarkSetCount = len(sets.Coverage)
             ctx_lookups.append(len(lookups))
             lookups.append(otl.buildLookup(sts, flags=0x10, markFilterSet=len(sets.Coverage) - 1))
+    # neighbouring letters whose below-vowels would touch: widen the second letter's advance
+    # (HarfBuzz zeroes mark advances after GPOS, and in RTL a letter's advance spaces it from the
+    # letter drawn after it, i.e. the logically earlier one)
+    adv_lookups = []
+    vset = [c[v] for v in below_v]
+    vinfo = {}
+    for v in below_v:
+        bv = glyph_bounds(font, c[v])
+        vinfo[v] = (bv[2] - bv[0])
+    advs = {L: font['hmtx'][L][0] for L in letters}
+    vcls = {v: (0 if vinfo[v] <= 140 else 1 if vinfo[v] <= 300 else 2 if vinfo[v] <= 380 else 3)
+            for v in below_v}
+    NCLS = 4
+    cls_w = {k: max([vinfo[v] for v in below_v if vcls[v] == k] or [0]) for k in range(NCLS)}
+    cls_v = {k: [v for v in below_v if vcls[v] == k] for k in range(NCLS)}
+    vpos = {}
+    for L in letters:
+        for v in below_v:
+            w = lb[L][2] - lb[L][0]
+            vpos[(L, v)] = round(lb[L][0] + REL_X.get(v, 0.5) * w) + solve_v(L, v)
+
+    def b1(L, k):
+        return min(vpos[(L, v)] for v in cls_v[k]) - cls_w[k] / 2
+
+    def a2(L, k):
+        return max(vpos[(L, v)] for v in cls_v[k]) - advs[L] + cls_w[k] / 2
+
+    rules = {}
+    for k1 in range(NCLS):
+        for k2 in range(NCLS):
+            if not cls_v[k1] or not cls_v[k2]:
+                continue
+            buck = {}
+            for L1 in letters:
+                for L2 in letters:
+                    pass
+            g1, g2 = {}, {}
+            for L in letters:
+                g1.setdefault(round(b1(L, k1) / 40), []).append(L)
+                g2.setdefault(round(a2(L, k2) / 40), []).append(L)
+            for ls1 in g1.values():
+                lo = min(b1(L, k1) for L in ls1)
+                for ls2 in g2.values():
+                    hi = max(a2(L, k2) for L in ls2)
+                    extra = int(-(-max(0, hi + VOWEL_GAP - lo) // 10) * 10)
+                    if extra:
+                        rules.setdefault((k1, k2, tuple(sorted(ls2)), extra), []).extend(ls1)
+    if rules:
+        sets.Coverage.append(otl.buildCoverage(sorted(vset, key=lambda n: gm[n]), gm))
+        sets.MarkSetCount = len(sets.Coverage)
+        advval = {}
+        sts = []
+        for (k1, k2, ls2, extra), ls1 in sorted(rules.items()):
+            if extra not in advval:
+                st = otl.buildSinglePosSubtable(
+                    {n: otl.buildValue({'XAdvance': extra}) for n in letters}, gm)
+                advval[extra] = len(lookups)
+                lookups.append(otl.buildLookup([st], flags=0))
+            st = ot.ChainContextPos()
+            st.Format = 3
+            st.BacktrackGlyphCount = 0
+            st.BacktrackCoverage = []
+            st.InputGlyphCount = 4
+            st.InputCoverage = [otl.buildCoverage(sorted(ls1, key=lambda n: gm[n]), gm),
+                                otl.buildCoverage(sorted((c[v] for v in cls_v[k1]), key=lambda n: gm[n]), gm),
+                                otl.buildCoverage(sorted(ls2, key=lambda n: gm[n]), gm),
+                                otl.buildCoverage(sorted((c[v] for v in cls_v[k2]), key=lambda n: gm[n]), gm)]
+            st.LookAheadGlyphCount = 0
+            st.LookAheadCoverage = []
+            r = ot.PosLookupRecord()
+            r.SequenceIndex = 2
+            r.LookupListIndex = advval[extra]
+            st.PosLookupRecord = [r]
+            st.PosCount = 1
+            sts.append(st)
+        print('adv rules', len(sts))
+        adv_lookups.append(len(lookups))
+        lookups.append(otl.buildLookup(sts, flags=0x10, markFilterSet=len(sets.Coverage) - 1))
     gpos.LookupList.LookupCount = len(lookups)
     for fr in gpos.FeatureList.FeatureRecord:
         if fr.FeatureTag == 'mark':
-            fr.Feature.LookupListIndex += [i_mb] + ctx_lookups
+            fr.Feature.LookupListIndex += [i_mb] + ctx_lookups + adv_lookups
             fr.Feature.LookupCount = len(fr.Feature.LookupListIndex)
         elif fr.FeatureTag == 'mkmk':
             fr.Feature.LookupListIndex.append(i_mm)
