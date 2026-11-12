@@ -108,6 +108,35 @@ def shift_glyph_x(font, name, dx):
     g.recalcBounds(font['glyf'])
 
 
+PERIOD_SCALE = 1.28     # the period read too small next to the letters
+SEMICOLON_RAISE = 50    # upper dot of the semicolon started too low
+NARROW_VOWELS = {0x5b7: 0.88, 0x5b8: 0.88}   # patah, qamats were wider than most letters
+
+
+def resize_punct_and_vowels(font):
+    c = font.getBestCmap()
+    glyf = font['glyf']
+    g = glyf[c[0x2e]]
+    g.recalcBounds(glyf)
+    xc, y0 = (g.xMin + g.xMax) / 2, g.yMin
+    g.coordinates = GlyphCoordinates(
+        [(round(xc + (x - xc) * PERIOD_SCALE), round(y0 + (y - y0) * PERIOD_SCALE))
+         for x, y in g.coordinates])
+    g.recalcBounds(glyf)
+    sc = glyf[c[0x3b]]
+    if sc.isComposite():
+        for comp in sc.components:
+            if comp.glyphName == c[0x2e]:
+                comp.y += SEMICOLON_RAISE
+        sc.recalcBounds(glyf)
+    for cp, k in NARROW_VOWELS.items():
+        v = glyf[c[cp]]
+        v.recalcBounds(glyf)
+        xm = (v.xMin + v.xMax) / 2
+        v.coordinates = GlyphCoordinates([(round(xm + (x - xm) * k), y) for x, y in v.coordinates])
+        v.recalcBounds(glyf)
+
+
 def pad_punctuation(font):
     c = font.getBestCmap()
     hmtx = font['hmtx']
@@ -167,6 +196,7 @@ def fix_spacing_and_punct(font):
                     (0x2069, 0), (0x2002, 500), (0x2003, 1000), (0x2005, 250)):
         if cp not in c:
             add_glyph(font, cp, 'uni%04X' % cp, Glyph0(), adv)
+    resize_punct_and_vowels(font)
     pad_punctuation(font)
     slant_ticks(font)
 
