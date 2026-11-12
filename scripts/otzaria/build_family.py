@@ -178,6 +178,8 @@ TEAMIM_SCALE = 1.55
 BELOW_VOWELS = [0x5b0, 0x5b1, 0x5b2, 0x5b3, 0x5b4, 0x5b5, 0x5b6, 0x5b7, 0x5b8, 0x5bb, 0x5c7]
 ABOVE_VOWELS = [0x5b9, 0x5ba]
 REL_X = {0x5b9: 0.22, 0x5ba: 0.22, 0x5bb: 0.42, 0x5bd: 0.30}
+DOTS = [0x5c1, 0x5c2]
+SHIN = 'uni05E9'
 LEVEL_TOP = 700          # normal letters share one height level above
 LEVEL_BASE = -30         # ... and one level below
 
@@ -277,7 +279,7 @@ def band_clear(ink, x0, x1, y0, y1):
     m, X0, Y0, H, sc = ink
     c0, c1 = int((x0 - X0) * sc), int((x1 - X0) * sc) + 1
     r0, r1 = int((H - (y1 - Y0)) * sc), int((H - (y0 - Y0)) * sc) + 1
-    if c0 < 0 or r0 < 0:
+    if c1 < 0 or r1 < 0:
         return True
     return not m[max(r0, 0):r1, max(c0, 0):c1].any()
 
@@ -289,6 +291,31 @@ def clear_dx(ink, cx, hw, y0, y1):
             if band_clear(ink, cx + dx - hw, cx + dx + hw, y0, y1):
                 return dx
     return 0
+
+
+def dot_boxes(font):
+    """Boxes of the shin/sin dots on shin, as the font's own mark positioning places them."""
+    import io
+    import uharfbuzz as hb
+    buf = io.BytesIO()
+    font.save(buf)
+    hf = hb.Font(hb.Face(hb.Blob(buf.getvalue())))
+    cm = font.getBestCmap()
+    out = {}
+    for cp in DOTS:
+        b = hb.Buffer()
+        b.add_str(chr(0x5e9) + chr(cp))
+        b.guess_segment_properties()
+        hb.shape(hf, b, {})
+        x = 0
+        for i, p in zip(b.glyph_infos, b.glyph_positions):
+            n = hf.glyph_to_string(i.codepoint)
+            if n == cm[cp]:
+                g = font['glyf'][n]
+                out[cp] = (g.xMin + x + p.x_offset, g.yMin + p.y_offset,
+                           g.xMax + x + p.x_offset, g.yMax + p.y_offset)
+            x += p.x_advance
+    return out
 
 
 def build_gpos(font, new_marks):
@@ -327,6 +354,7 @@ def build_gpos(font, new_marks):
         return n, b, (CID[cls], anchor)
 
     subtables = []
+    tdx = {}
     groups = {}
     for cps, cls in ((below_v + [0x5bd], 'below'), (above_v, 'above')):
         for cp in cps:
@@ -357,6 +385,7 @@ def build_gpos(font, new_marks):
                 else:
                     y0, y1, y = T_BELOW_Y - h, T_BELOW_Y - 8, T_BELOW_Y
                 dx = clear_dx(inks[L], cx, hw, y0, y1)
+                tdx[(L, cp)] = (cx + dx, y)
                 bases[L] = {CID[cls]: otl.buildAnchor(cx + dx, y)}
             subtables.append(otl.buildMarkBasePosSubtable({n: ma}, bases, gm))
 
@@ -377,11 +406,13 @@ def build_gpos(font, new_marks):
     i_mm = len(lookups)
     lookups.append(otl.buildLookup([mm], flags=0))
 
-    # vowel + te'am on the same side: the te'am goes to the right of the vowel, the vowel nudges left
+    # vowel/dot + te'am on the same side: solved per letter against the real letter ink,
+    # the other marks and the shin/sin dots; the te'am prefers the left of the vowel
     gdef = font['GDEF'].table
     sets = gdef.MarkGlyphSetsDef
     single = {}
-    allm = sorted({c[cp] for cp in below_v + above_v + t_above + t_below}, key=lambda n: gm[n])
+    allm = sorted({c[cp] for cp in below_v + above_v + t_above + t_below + DOTS if cp in c},
+                  key=lambda n: gm[n])
 
     def shift_lookup(v):
         if v not in single:
@@ -391,62 +422,141 @@ def build_gpos(font, new_marks):
             lookups.append(otl.buildLookup([st], flags=0))
         return single[v]
 
+    dot_box = dot_boxes(font)
+    GAP = 30
+
     def q(v):
         return int(round(v / 20.0)) * 20
 
-    ctx_lookups = []
-    wgroups = {}
-    for L in letters:
-        w = lb[L][2] - lb[L][0]
-        wgroups.setdefault(int(round(w / 50.0)) * 50, []).append((L, w))
-    for vs, ts, side in ((below_v, t_below, 'below'), (above_v, t_above, 'above')):
-        sts = []
-        if side == 'below':
-            groups_ = [(None, 0)]
-        else:
-            groups_ = [(sorted(x[0] for x in g), sum(x[1] for x in g) / len(g))
-                       for g in wgroups.values()]
-        for gl, gw in groups_:
-            for v in vs:
-                bv = glyph_bounds(font, c[v])
-                wv = bv[2] - bv[0]
-                for t in ts:
-                    bt = glyph_bounds(font, c[t])
-                    wt = bt[2] - bt[0]
-                    need = (wv + wt) / 2 + 30
-                    need = max(0, need + (0.5 - REL_X.get(v, 0.5)) * (gw or 380))
-                    dv, dt = q(0.4 * need), -q(0.6 * need)
-                    if not dv and not dt:
+    def bbox_at(b, xc_target, y0):
+        xc = (b[0] + b[2]) // 2
+        return (xc_target + b[0] - xc, y0, xc_target + b[2] - xc, y0 + b[3] - b[1])
+
+    def y_near(a, b):
+        return a[1] < b[3] + 20 and b[1] < a[3] + 20
+
+    def x_apart(a, b, dxa, dxb):
+        return a[2] + dxa + GAP <= b[0] + dxb or b[2] + dxb + GAP <= a[0] + dxa
+
+    def te_box(L, side, t):
+        bt = glyph_bounds(font, c[t])
+        tx, ty = tdx[(L, t)]
+        xc = (bt[0] + bt[2]) // 2
+        h = bt[3] - bt[1]
+        y0 = ty - h if side == 'below' else ty
+        return (tx + bt[0] - xc, y0, tx + bt[2] - xc, y0 + h)
+
+    def vowel_box(L, side, v):
+        lbb = lb[L]
+        bv = glyph_bounds(font, c[v])
+        vx = round(lbb[0] + REL_X.get(v, 0.5) * (lbb[2] - lbb[0]))
+        if side == 'above':
+            return bbox_at(bv, vx, level_above(lbb))
+        return bbox_at(bv, vx, level_below(lbb) - (bv[3] - bv[1]))
+
+    def solve(L, side, v, dot, t):
+        ink, lbb = inks[L], lb[L]
+        tb = te_box(L, side, t)
+        vb = vowel_box(L, side, v) if v is not None else None
+        db = dot_box.get(dot) if (dot and L == SHIN) else None
+        nom_v = nom_t = 0
+        if vb is not None:
+            need = max(0, ((vb[2] - vb[0]) + (tb[2] - tb[0])) / 2 + 30
+                       + (0.5 - REL_X.get(v, 0.5)) * (lbb[2] - lbb[0]))
+            nom_v, nom_t = 0.4 * need, -0.6 * need
+        best = None
+        for dt in range(-700, 501, 20):
+            if not band_clear(ink, tb[0] + dt - 14, tb[2] + dt + 14, tb[1], tb[3]):
+                continue
+            if db is not None and y_near(tb, db) and not x_apart(tb, db, dt, 0):
+                continue
+            for dv in (range(-300, 501, 20) if vb is not None else (0,)):
+                if vb is not None:
+                    if not band_clear(ink, vb[0] + dv - 14, vb[2] + dv + 14, vb[1], vb[3]):
                         continue
-                    if gl is None:
-                        st = ot.ContextPos()
-                        st.Format = 3
-                        st.GlyphCount = 2
-                        st.Coverage = [otl.buildCoverage([c[v]], gm),
-                                       otl.buildCoverage([c[t]], gm)]
-                    else:
-                        st = ot.ChainContextPos()
-                        st.Format = 3
-                        st.BacktrackGlyphCount = 1
-                        st.BacktrackCoverage = [otl.buildCoverage(
-                            sorted(gl, key=lambda n: gm[n]), gm)]
-                        st.InputGlyphCount = 2
-                        st.InputCoverage = [otl.buildCoverage([c[v]], gm),
-                                            otl.buildCoverage([c[t]], gm)]
-                        st.LookAheadGlyphCount = 0
-                        st.LookAheadCoverage = []
-                    recs = []
-                    for idx, d in ((0, dv), (1, dt)):
-                        if d:
-                            r = ot.PosLookupRecord()
-                            r.SequenceIndex = idx
-                            r.LookupListIndex = shift_lookup(d)
-                            recs.append(r)
-                    st.PosLookupRecord = recs
-                    st.PosCount = len(recs)
-                    sts.append(st)
+                    if y_near(tb, vb) and not x_apart(tb, vb, dt, dv):
+                        continue
+                    if db is not None and y_near(vb, db) and not x_apart(vb, db, dv, 0):
+                        continue
+                cost = abs(dv - nom_v) + abs(dt - nom_t)
+                if vb is not None and y_near(tb, vb) and tb[0] + dt > vb[0] + dv:
+                    cost += 250
+                if best is None or cost < best[0]:
+                    best = (cost, dv, dt)
+        if best is None:
+            return 0, 0
+        return q(best[1]), q(best[2])
+
+    def solve_vd(L, v, dot):
+        vb = vowel_box(L, 'above', v)
+        db = dot_box[dot]
+        for dv in range(0, 501, 20):
+            if band_clear(inks[L], vb[0] + dv, vb[2] + dv, vb[1], vb[3]) and (
+                    not y_near(vb, db) or x_apart(vb, db, dv, 0)):
+                return q(dv)
+        return 0
+
+    ctx_lookups = []
+    for vs, ts, side in ((below_v, t_below, 'below'), (above_v, t_above, 'above')):
+        rules = {}
+        for L in letters:
+            combos = []
+            for t in ts:
+                combos.append((None, None, t))
+                for v in vs:
+                    combos.append((v, None, t))
+            if side == 'above' and L == SHIN:
+                for dot in DOTS:
+                    for t in ts:
+                        combos.append((None, dot, t))
+                        for v in vs:
+                            combos.append((v, dot, t))
+                    for v in vs:
+                        combos.append((v, dot, None))
+            for v, dot, t in combos:
+                if v is None and dot is None:
+                    continue
+                if t is None:
+                    shifts = {v: solve_vd(L, v, dot)}
+                else:
+                    dv, dt = solve(L, side, v, dot, t)
+                    shifts = {t: dt}
+                    if v is not None:
+                        shifts[v] = dv
+                key = tuple(sorted(shifts.items()))
+                # shapers differ on whether the dot comes before or after the vowel
+                for order in ((v, dot, t), (dot, v, t)) if (v and dot) else ((v, dot, t),):
+                    seq = tuple(x for x in order if x is not None)
+                    rules.setdefault((seq, key), []).append(L)
+        sts = []
+        for (seq, shifts), gl in sorted(rules.items(), key=lambda kv: -len(kv[0][0])):
+            sh = dict(shifts)
+            if not any(x in DOTS for x in seq) and not any(sh.values()):
+                continue
+            st = ot.ChainContextPos()
+            st.Format = 3
+            st.BacktrackGlyphCount = 1
+            st.BacktrackCoverage = [otl.buildCoverage(sorted(gl, key=lambda n: gm[n]), gm)]
+            st.InputGlyphCount = len(seq)
+            st.InputCoverage = [otl.buildCoverage([c[x]], gm) for x in seq]
+            st.LookAheadGlyphCount = 0
+            st.LookAheadCoverage = []
+            recs = []
+            for i, x in enumerate(seq):
+                d = sh.get(x, 0)
+                if d:
+                    r = ot.PosLookupRecord()
+                    r.SequenceIndex = i
+                    r.LookupListIndex = shift_lookup(d)
+                    recs.append(r)
+            st.PosLookupRecord = recs
+            st.PosCount = len(recs)
+            sts.append(st)
         if sts:
-            cov = otl.buildCoverage(sorted({c[x] for x in vs + ts}, key=lambda n: gm[n]), gm)
+            members = {c[x] for x in vs + ts}
+            if side == 'above':
+                members |= {c[x] for x in DOTS if x in c}
+            cov = otl.buildCoverage(sorted(members, key=lambda n: gm[n]), gm)
             sets.Coverage.append(cov)
             sets.MarkSetCount = len(sets.Coverage)
             ctx_lookups.append(len(lookups))
@@ -497,6 +607,16 @@ def set_names(font, style, wclass):
     font['head'].macStyle = 1 if style == 'Bold' else 0
 
 
+def sync_side_bearings(font):
+    """FreeType positions an outline by hmtx lsb, so lsb must equal the real xMin."""
+    glyf, hmtx = font['glyf'], font['hmtx']
+    for n in font.getGlyphOrder():
+        g = glyf[n]
+        if g.numberOfContours != 0:
+            g.recalcBounds(glyf)
+            hmtx[n] = (hmtx[n][0], g.xMin)
+
+
 def build(style, wght, wclass):
     if wght is None:
         font = extrapolate_light()
@@ -511,6 +631,10 @@ def build(style, wght, wclass):
     new_marks = add_marks(font, mark_w)
     build_gpos(font, new_marks)
     set_names(font, style, wclass)
+    sync_side_bearings(font)
+    # win metrics bound the clip box on GDI; the tallest stack (letter+vowel+te'am) reaches ~1170/-735.
+    # hhea/typo stay 900/-300 so line spacing matches the other bundled fonts.
+    font['OS/2'].usWinAscent, font['OS/2'].usWinDescent = 1200, 760
     path = '%s/Mekorot-%s.ttf' % (OUT, style)
     font.save(path)
     print('built', path, 'new marks:', len(new_marks))
