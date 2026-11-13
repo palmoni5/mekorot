@@ -95,7 +95,7 @@ def _sh(pts, dx):
 
 
 HOOK = [(30, 264), (25, 165), (58, 75), (130, 26)]        # tipcha: head on top, tail to the right
-HOOK_R = [1.34, 1.0, 0.76, 0.78]
+HOOK_R = [1.22, 1.0, 0.78, 0.8]
 HOOK_W, HOOK_H = 155, 290
 
 
@@ -114,7 +114,7 @@ def _telisha(r, gedola, dx=0):
     cx, cy, rad = 172, 172, 74
     tail = [(cx - rad * 0.74, cy - rad * 0.74), (60, 62), (30, 30)]
     lp = ring(cx, cy, rad, r * 0.9, mod=0.22)
-    tl = stroke(tail, [0.72, 0.85, 1.32], r)
+    tl = stroke(tail, [0.74, 0.88, 1.12], r)
     g = unary_union([lp, tl])
     if not gedola:
         g = affinity.scale(g, xfact=-1, yfact=1, origin=(w / 2.0, 0))
@@ -124,20 +124,20 @@ def _telisha(r, gedola, dx=0):
 def _angle(r, w=190, h=272):
     """yetiv / mahpakh / ole: an open wedge, lower arm heavier."""
     return stroke([(w - 26, h - 24), (w * 0.52, h * 0.70), (26, h / 2.0), (w * 0.52, h * 0.30), (w - 26, 24)],
-                  [0.7, 0.72, 1.0, 1.0, 1.38], r, smooth=False)
+                  [0.74, 0.76, 1.0, 1.0, 1.14], r, smooth=False)
 
 
 def _corner(r):
     """munah / iluy: upright thin, foot heavy, soft corner."""
     return stroke([(187, 182), (184, 100), (178, 30), (100, 27), (27, 30)],
-                  [0.78, 0.68, 0.9, 1.0, 1.4], r, smooth=False)
+                  [0.8, 0.72, 0.9, 1.0, 1.15], r, smooth=False)
 
 
 def _wish(r, up):
     """etnahta (up=True: stem on top) / atnah hafukh, galgal (stem below)."""
     arch = stroke([(30, 30), (34, 100), (72, 166), (134, 198), (196, 166), (234, 100), (238, 30)],
-                  [1.38, 0.9, 0.74, 0.8, 0.74, 0.9, 1.38], r)
-    stem = stroke([(134, 196), (134, 262)], [0.74, 1.05], r)
+                  [1.12, 0.92, 0.78, 0.82, 0.78, 0.92, 1.12], r)
+    stem = stroke([(134, 196), (134, 262)], [0.76, 0.95], r)
     g = unary_union([arch, stem])
     if not up:
         g = affinity.scale(g, xfact=1, yfact=-1, origin=(0, 145))
@@ -146,7 +146,7 @@ def _wish(r, up):
 
 def _wave(r):
     return stroke([(46, 58), (30, 122), (72, 178), (140, 176), (212, 108), (284, 40), (352, 36), (396, 92),
-                   (376, 166)], [1.36, 0.95, 0.8, 0.8, 0.72, 0.8, 0.8, 0.95, 1.36], r)
+                   (376, 166)], [1.14, 0.95, 0.82, 0.82, 0.76, 0.82, 0.82, 0.95, 1.14], r)
 
 
 # cp -> (W0, H0, builder(r) -> shapely geometry)
@@ -154,9 +154,9 @@ DESIGNS = {
     0x591: (269, 289, lambda r: _wish(r, True)),
     0x592: (273, 227, lambda r: unary_union([dot(136, 184, DOT_D), dot(43, 43, DOT_D), dot(230, 43, DOT_D)])),
     0x593: (209, 323, lambda r: stroke([(172, 300), (32, 244), (178, 190), (32, 132), (178, 78), (52, 24)],
-                                       [1.25, 0.7, 1.0, 0.7, 1.0, 1.3], r, smooth=False)),
+                                       [1.1, 0.74, 1.0, 0.74, 1.0, 1.14], r, smooth=False)),
     0x594: (93, 227, lambda r: unary_union([dot(46, 184, DOT_D), dot(46, 43, DOT_D)])),
-    0x595: (237, 255, lambda r: unary_union([stroke([(30, 228), (30, 130), (30, 32)], [0.72, 0.72, 1.36], r),
+    0x595: (237, 255, lambda r: unary_union([stroke([(30, 228), (30, 130), (30, 30)], [0.8, 0.78, 1.1], r),
                                              dot(194, 208, DOT_D), dot(194, 47, DOT_D)])),
     0x596: (HOOK_W, HOOK_H, lambda r: _hook(r)),
     0x597: (209, 233, lambda r: Polygon([(104, 200), (176, 116), (104, 33), (33, 116)]).buffer(r * 1.3, 12)),
@@ -170,16 +170,16 @@ DESIGNS = {
     0x59e: (337, 290, lambda r: unary_union([_hook(r, flip=True), _hook(r, flip=True, dx=182)])),
     0x59f: (620, 289, lambda r: unary_union([_telisha(r, False), _telisha(r, True, dx=332)])),
     0x5a0: (288, 289, lambda r: _telisha(r, True)),
-    0x5a1: (234, 251, lambda r: unary_union([stroke([(30, 226), (28, 125), (30, 30)], [0.78, 0.72, 1.36], r),
+    0x5a1: (234, 251, lambda r: unary_union([stroke([(30, 226), (28, 125), (30, 28)], [0.82, 0.76, 1.12], r),
                                              stroke([(204, 226), (200, 160), (140, 116), (36, 110)],
-                                                    [1.36, 0.95, 0.72, 0.7], r)])),
+                                                    [1.15, 0.95, 0.76, 0.74], r)])),
     0x5a2: (269, 290, lambda r: _wish(r, False)),
     0x5a3: (213, 205, _corner),
     0x5a4: (190, 272, _angle),
     0x5a5: (HOOK_W, HOOK_H, lambda r: _hook(r, mirror=True)),
     0x5a6: (334, 291, lambda r: unary_union([_hook(r, mirror=True), _hook(r, mirror=True, dx=179)])),
     0x5a7: (192, 245, lambda r: stroke([(168, 220), (30, 194), (164, 52), (26, 26)],
-                                       [1.2, 0.78, 0.78, 1.38], r, smooth=False)),
+                                       [1.1, 0.8, 0.8, 1.15], r, smooth=False)),
     0x5a8: (HOOK_W, HOOK_H, lambda r: _hook(r, mirror=True, flip=True)),
     0x5a9: (288, 289, lambda r: _telisha(r, False)),
     0x5aa: (269, 290, lambda r: _wish(r, False)),

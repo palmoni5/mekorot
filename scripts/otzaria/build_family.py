@@ -479,6 +479,9 @@ def add_marks(font, wght):
     for n in new_marks:
         unify_dots(font, n)
         round_corners(font, n)
+    # te'amim and bar-shaped niqqud redrawn in Mekorot's own brush language
+    import brush_marks
+    brush_marks.restyle(font, PATAH_THIN)
     return new_marks
 
 
