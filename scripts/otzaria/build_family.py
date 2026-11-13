@@ -311,6 +311,7 @@ BELOW_VOWELS = [0x5b0, 0x5b1, 0x5b2, 0x5b3, 0x5b4, 0x5b5, 0x5b6, 0x5b7, 0x5b8, 0
 ABOVE_VOWELS = [0x5b9, 0x5ba]
 REL_X = {0x5b9: 0.22, 0x5ba: 0.22, 0x5bb: 0.42, 0x5bd: 0.30}
 HOLAM_ON_LAMED = -0.20   # holam sits left of the lamed's ascender, at the normal vowel height
+KAF_ARM_GAP = 130  # final kaf: gap between its arm and the vowel inside
 HOLAM_BY_LETTER = {'uni05DC': HOLAM_ON_LAMED, 'uni05D0': 0.0}   # alef: over the upper-left yod
 DOTS = [0x5c1, 0x5c2]
 SHIN = 'uni05E9'
@@ -605,6 +606,21 @@ def build_gpos(font, new_marks):
             return LEVEL_BASE - 70
         return b[1] - 25
 
+    def kaf_hollow():
+        """Final kaf: the open space under its arm, where the below-vowel sits inside the letter."""
+        n = c[0x5da]
+        m, X0, Y0, H, sc = inks[n]
+        b = lb[n]
+        w = b[2] - b[0]
+        c0, c1 = int((b[0] + 0.2 * w - X0) * sc), int((b[0] + 0.45 * w - X0) * sc) + 1
+        rows = m[:, c0:c1].any(axis=1).nonzero()[0]
+        arm = Y0 + H - (rows.max() + 1) / sc
+        probe = int((H - (arm - 150 - Y0)) * sc)
+        cols = m[probe].nonzero()[0]
+        stem = X0 + cols.min() / sc
+        return round((b[0] + stem) / 2), round(arm - KAF_ARM_GAP)
+
+    kaf_pos = kaf_hollow()
     T_ABOVE_Y = LEVEL_TOP + ABOVE_GAP
     T_BELOW_Y = LEVEL_BASE - 70
 
@@ -642,8 +658,9 @@ def build_gpos(font, new_marks):
             r_eff = HOLAM_BY_LETTER.get(n, rel) if rel == REL_X[0x5b9] else rel
             x = round(b[0] + r_eff * (b[2] - b[0]))
             ya = LEVEL_TOP + ABOVE_GAP if (r_eff != rel and n == 'uni05DC') else level_above(b)
+            xb, yb = (kaf_pos[0], kaf_pos[1]) if n == c[0x5da] else (x, level_below(b))
             bases[n] = {CID['above']: otl.buildAnchor(x, ya),
-                        CID['below']: otl.buildAnchor(x, level_below(b))}
+                        CID['below']: otl.buildAnchor(xb, yb)}
         subtables.append(otl.buildMarkBasePosSubtable(mk, bases, gm))
     # te'amim: same height on every letter, nudged sideways only to clear the letter's own ink
     for cps, cls in ((t_above, 'above'), (t_below, 'below')):
@@ -742,6 +759,8 @@ def build_gpos(font, new_marks):
             if rel != REL_X.get(v, 0.5):
                 return bbox_at(bv, vx, LEVEL_TOP + ABOVE_GAP)
             return bbox_at(bv, vx, level_above(lbb))
+        if L == c[0x5da]:
+            return bbox_at(bv, kaf_pos[0], kaf_pos[1] - (bv[3] - bv[1]))
         return bbox_at(bv, vx, level_below(lbb) - (bv[3] - bv[1]))
 
     def solve(L, side, v, dot, t, nbr=None):
@@ -1003,7 +1022,7 @@ def build_gpos(font, new_marks):
     for L in letters:
         for v in below_v:
             w = lb[L][2] - lb[L][0]
-            vpos[(L, v)] = round(lb[L][0] + REL_X.get(v, 0.5) * w) + solve_v(L, v)
+            vpos[(L, v)] = (kaf_pos[0] if L == c[0x5da] else round(lb[L][0] + REL_X.get(v, 0.5) * w)) + solve_v(L, v)
 
     def b1(L, k):
         return min(vpos[(L, v)] for v in cls_v[k]) - cls_w[k] / 2
