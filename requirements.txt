@@ -89,6 +89,7 @@ rich==13.5.2
 rstr==3.2.1
 selenium==4.11.2
 sh==2.0.6
+shapely==2.2.0
 six==1.16.0
 skia-pathops==0.8.0
 skia-python==87.5
