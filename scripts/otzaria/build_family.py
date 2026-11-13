@@ -6,6 +6,7 @@
  - zero-width / spacing format characters
 Usage: build_family.py <variable.ttf> <noto_rashi.ttf> <out_dir>
 """
+import os
 import copy
 import sys
 
@@ -179,6 +180,15 @@ def resize_punct_and_vowels(font):
     for cp in DOT_VOWELS:
         if cp in c:
             unify_dots(font, c[cp])
+    kw = float(os.environ.get('VOWEL_W', '0.85'))
+    if kw != 1:
+        for cp in (0x5b1, 0x5b2, 0x5b3, 0x5b4, 0x5b5, 0x5b6, 0x5bb):
+            if cp in c and glyf[c[cp]].numberOfContours > 0:
+                v = glyf[c[cp]]
+                v.recalcBounds(glyf)
+                xm = (v.xMin + v.xMax) / 2
+                v.coordinates = GlyphCoordinates([(round(xm + (x - xm) * kw), y) for x, y in v.coordinates])
+                v.recalcBounds(glyf)
     for cp, k in NARROW_VOWELS.items():
         v = glyf[c[cp]]
         v.recalcBounds(glyf)
@@ -301,6 +311,7 @@ BELOW_VOWELS = [0x5b0, 0x5b1, 0x5b2, 0x5b3, 0x5b4, 0x5b5, 0x5b6, 0x5b7, 0x5b8, 0
 ABOVE_VOWELS = [0x5b9, 0x5ba]
 REL_X = {0x5b9: 0.22, 0x5ba: 0.22, 0x5bb: 0.42, 0x5bd: 0.30}
 HOLAM_ON_LAMED = -0.20   # holam sits left of the lamed's ascender, at the normal vowel height
+HOLAM_BY_LETTER = {'uni05DC': HOLAM_ON_LAMED, 'uni05D0': 0.0}   # alef: over the upper-left yod
 DOTS = [0x5c1, 0x5c2]
 SHIN = 'uni05E9'
 LEVEL_TOP = 700          # normal letters share one height level above
@@ -628,9 +639,9 @@ def build_gpos(font, new_marks):
         bases = {}
         for n in letters:
             b = lb[n]
-            r_eff = HOLAM_ON_LAMED if (n == 'uni05DC' and rel == REL_X[0x5b9]) else rel
+            r_eff = HOLAM_BY_LETTER.get(n, rel) if rel == REL_X[0x5b9] else rel
             x = round(b[0] + r_eff * (b[2] - b[0]))
-            ya = LEVEL_TOP + ABOVE_GAP if r_eff != rel else level_above(b)
+            ya = LEVEL_TOP + ABOVE_GAP if (r_eff != rel and n == 'uni05DC') else level_above(b)
             bases[n] = {CID['above']: otl.buildAnchor(x, ya),
                         CID['below']: otl.buildAnchor(x, level_below(b))}
         subtables.append(otl.buildMarkBasePosSubtable(mk, bases, gm))
@@ -693,6 +704,11 @@ def build_gpos(font, new_marks):
 
     dot_box = dot_boxes(font)
     GAP = 30
+    advs0 = {L: font['hmtx'][L][0] for L in letters}
+    # letters drawn after (left of) another in RTL whose descender can reach a below te'am
+    desc_nbrs = []
+    finals = [c[cp] for cp in (0x5da, 0x5dd, 0x5df, 0x5e3, 0x5e5)]
+    tl_rec = {}
 
     def q(v):
         return int(round(v / 20.0)) * 20
@@ -719,8 +735,8 @@ def build_gpos(font, new_marks):
         lbb = lb[L]
         bv = glyph_bounds(font, c[v])
         rel = REL_X.get(v, 0.5)
-        if L == 'uni05DC' and rel == REL_X[0x5b9]:
-            rel = HOLAM_ON_LAMED
+        if rel == REL_X[0x5b9]:
+            rel = HOLAM_BY_LETTER.get(L, rel)
         vx = round(lbb[0] + rel * (lbb[2] - lbb[0]))
         if side == 'above':
             if rel != REL_X.get(v, 0.5):
@@ -728,8 +744,9 @@ def build_gpos(font, new_marks):
             return bbox_at(bv, vx, level_above(lbb))
         return bbox_at(bv, vx, level_below(lbb) - (bv[3] - bv[1]))
 
-    def solve(L, side, v, dot, t):
+    def solve(L, side, v, dot, t, nbr=None):
         ink, lbb = inks[L], lb[L]
+        nink, nadv = (inks[nbr], advs0[nbr]) if nbr else (None, 0)
         tb = te_box(L, side, t)
         vb = vowel_box(L, side, v) if v is not None else None
         db = dot_box.get(dot) if (dot and L == SHIN) else None
@@ -738,28 +755,53 @@ def build_gpos(font, new_marks):
             need = max(0, ((vb[2] - vb[0]) + (tb[2] - tb[0])) / 2 + 30
                        + (0.5 - REL_X.get(v, 0.5)) * (lbb[2] - lbb[0]))
             nom_v, nom_t = 0.4 * need, -0.6 * need
+        lo, hi = lbb[0] - 40, lbb[2] + 40
         best = None
-        for dt in range(-700, 501, 20):
-            if not band_clear(ink, tb[0] + dt - INK_PAD, tb[2] + dt + INK_PAD, tb[1], tb[3]):
-                continue
-            if db is not None and y_near(tb, db) and not x_apart(tb, db, dt, 0):
-                continue
-            for dv in (range(-300, 501, 20) if vb is not None else (0,)):
-                if vb is not None:
-                    if not band_clear(ink, vb[0] + dv - INK_PAD, vb[2] + dv + INK_PAD, vb[1], vb[3]):
-                        continue
-                    if y_near(tb, vb) and not x_apart(tb, vb, dt, dv):
-                        continue
-                    if db is not None and y_near(vb, db) and not x_apart(vb, db, dv, 0):
-                        continue
-                cost = abs(dv - nom_v) + abs(dt - nom_t)
-                if vb is not None and y_near(tb, vb) and tb[0] + dt > vb[0] + dv:
-                    cost += 250
-                if best is None or cost < best[0]:
-                    best = (cost, dv, dt)
+        # first keep the te'am over its own letter, so it cannot reach a neighbour's marks
+        for strict in (2, 0):
+            for dt in range(-700, 501, 20):
+                if strict and not (tb[0] + dt >= lo and tb[2] + dt <= hi):
+                    continue
+                if not band_clear(ink, tb[0] + dt - INK_PAD, tb[2] + dt + INK_PAD, tb[1], tb[3]):
+                    continue
+                if nink is not None and not band_clear(nink, tb[0] + dt - INK_PAD + nadv,
+                                                       tb[2] + dt + INK_PAD + nadv, tb[1], tb[3]):
+                    continue
+                if db is not None and y_near(tb, db) and not x_apart(tb, db, dt, 0):
+                    continue
+                for dv in (range(-300, 501, 20) if vb is not None else (0,)):
+                    if vb is not None:
+                        m = 0 if strict == 2 else 90
+                        if strict and not (vb[0] + dv >= lo - m and vb[2] + dv <= hi + m):
+                            continue
+                        if not band_clear(ink, vb[0] + dv - INK_PAD, vb[2] + dv + INK_PAD, vb[1], vb[3]):
+                            continue
+                        if nink is not None and not band_clear(
+                                nink, vb[0] + dv - INK_PAD + nadv, vb[2] + dv + INK_PAD + nadv, vb[1], vb[3]):
+                            continue
+                        if y_near(tb, vb) and not x_apart(tb, vb, dt, dv):
+                            continue
+                        if db is not None and y_near(vb, db) and not x_apart(vb, db, dv, 0):
+                            continue
+                    cost = abs(dv - nom_v) + abs(dt - nom_t)
+                    if vb is not None and y_near(tb, vb) and tb[0] + dt > vb[0] + dv:
+                        cost += 250
+                    if best is None or cost < best[0]:
+                        best = (cost, dv, dt)
+            if best is not None:
+                break
         if best is None:
             return 0, 0
         return q(best[1]), q(best[2])
+
+    def nbr_hit(L, side, v, t, dv, dt, N):
+        """Would the placed te'am or vowel touch the ink of the descender letter drawn after L?"""
+        nadv = advs0[N]
+        boxes = [(te_box(L, side, t), dt)]
+        if v is not None:
+            boxes.append((vowel_box(L, side, v), dv))
+        return any(not band_clear(inks[N], b[0] + d - INK_PAD + nadv, b[2] + d + INK_PAD + nadv, b[1], b[3])
+                   for b, d in boxes)
 
     def solve_v(L, v):
         """Sideways nudge of a lone below-vowel clear of the letter's ink (descenders)."""
@@ -804,6 +846,17 @@ def build_gpos(font, new_marks):
                         combos.append((v, dot, None))
             for v, dot, t in combos:
                 if v is None and dot is None:
+                    if side == 'below' and t is not None:
+                        tl_rec[(L, t)] = min(tl_rec.get((L, t), 1e9), te_box(L, side, t)[0])
+                        byshift = {}
+                        for N in desc_nbrs:
+                            if not nbr_hit(L, side, None, t, 0, 0, N):
+                                continue
+                            r2 = solve(L, side, None, None, t, nbr=N)
+                            if r2[1]:
+                                byshift.setdefault(r2, []).append(N)
+                        for (dv2, dt2), ns in byshift.items():
+                            rules.setdefault(((t,), ((t, dt2),), tuple(sorted(ns))), []).append(L)
                     continue
                 if t is None and dot is None:
                     shifts = {v: solve_v(L, v)}
@@ -811,6 +864,8 @@ def build_gpos(font, new_marks):
                     shifts = {v: solve_vd(L, v, dot)}
                 else:
                     dv, dt = solve(L, side, v, dot, t)
+                    if side == 'below' and dot is None:
+                        tl_rec[(L, t)] = min(tl_rec.get((L, t), 1e9), te_box(L, side, t)[0] + dt)
                     shifts = {t: dt}
                     if v is not None:
                         shifts[v] = dv
@@ -818,40 +873,117 @@ def build_gpos(font, new_marks):
                 # shapers differ on whether the dot comes before or after the vowel
                 for order in ((v, dot, t), (dot, v, t)) if (v and dot) else ((v, dot, t),):
                     seq = tuple(x for x in order if x is not None)
-                    rules.setdefault((seq, key), []).append(L)
-        sts = []
-        for (seq, shifts), gl in sorted(rules.items(), key=lambda kv: -len(kv[0][0])):
-            sh = dict(shifts)
-            if side == 'above' and not any(x in DOTS for x in seq) and not any(sh.values()):
+                    rules.setdefault((seq, key, ()), []).append(L)
+                if side == 'below' and t is not None and dot is None:
+                    byshift = {}
+                    for N in desc_nbrs:
+                        if not nbr_hit(L, side, v, t, dv, dt, N):
+                            continue
+                        r2 = solve(L, side, v, dot, t, nbr=N)
+                        if r2 != (dv, dt):
+                            byshift.setdefault(r2, []).append(N)
+                    for (dv2, dt2), ns in byshift.items():
+                        sh2 = {t: dt2}
+                        if v is not None:
+                            sh2[v] = dv2
+                        seq = tuple(x for x in (v, t) if x is not None)
+                        rules.setdefault((seq, tuple(sorted(sh2.items())), tuple(sorted(ns))), []).append(L)
+        print(side, 'ctx rules', len(rules), 'with lookahead', sum(1 for k in rules if k[2]))
+        set_idx = None
+        for chunk in [letters[i::24] for i in range(24)]:
+            cset = set(chunk)
+            sts = []
+            for (seq, shifts, la), gl0 in sorted(rules.items(), key=lambda kv: (not kv[0][2], -len(kv[0][0]))):
+                gl = [x for x in gl0 if x in cset]
+                if not gl:
+                    continue
+                sh = dict(shifts)
+                if side == 'above' and not any(x in DOTS for x in seq) and not any(sh.values()):
+                    continue
+                st = ot.ChainContextPos()
+                st.Format = 3
+                st.BacktrackGlyphCount = 1
+                st.BacktrackCoverage = [otl.buildCoverage(sorted(gl, key=lambda n: gm[n]), gm)]
+                st.InputGlyphCount = len(seq)
+                st.InputCoverage = [otl.buildCoverage([c[x]], gm) for x in seq]
+                st.LookAheadGlyphCount = 1 if la else 0
+                st.LookAheadCoverage = [otl.buildCoverage(list(la), gm)] if la else []
+                recs = []
+                for i, x in enumerate(seq):
+                    d = sh.get(x, 0)
+                    if d:
+                        r = ot.PosLookupRecord()
+                        r.SequenceIndex = i
+                        r.LookupListIndex = shift_lookup(d)
+                        recs.append(r)
+                st.PosLookupRecord = recs
+                st.PosCount = len(recs)
+                sts.append(st)
+            if sts:
+                members = {c[x] for x in vs + ts}
+                if side == 'above':
+                    members |= {c[x] for x in DOTS if x in c}
+                cov = otl.buildCoverage(sorted(members, key=lambda n: gm[n]), gm)
+                sets.Coverage.append(cov)
+                sets.MarkSetCount = len(sets.Coverage)
+                ctx_lookups.append(len(lookups))
+                lk = otl.buildLookup(sts, flags=0x10, markFilterSet=len(sets.Coverage) - 1)
+                if False:
+                    for i, st in enumerate(lk.SubTable):
+                        ext = ot.ExtensionPos()
+                        ext.Format = 1
+                        ext.ExtensionLookupType = 8
+                        ext.ExtSubTable = st
+                        lk.SubTable[i] = ext
+                    lk.LookupType = 9
+                lookups.append(lk)
+    # a below te'am next to a final letter's descender: widen the final letter's advance
+    def band_right(ink, y0, y1):
+        m, X0, Y0, H, sc = ink
+        r0, r1 = max(int((H - (y1 - Y0)) * sc), 0), int((H - (y0 - Y0)) * sc) + 1
+        cols = m[r0:r1].any(axis=0).nonzero()[0]
+        return None if len(cols) == 0 else X0 + (cols.max() + 1) / sc
+
+    tn_lookups = []
+    tn_rules = {}
+    for (L, t), tl in tl_rec.items():
+        tb = te_box(L, 'below', t)
+        for N in finals:
+            nr = band_right(inks[N], tb[1], tb[3])
+            if nr is None:
                 continue
+            need = nr - advs0[N] - (tl - INK_PAD)
+            extra = int(-(-max(0, need) // 10) * 10)
+            if extra:
+                tn_rules.setdefault((t, N, extra), []).append(L)
+    print('te am next to final rules', len(tn_rules))
+    if tn_rules:
+        sets.Coverage.append(otl.buildCoverage(sorted({c[x] for x in t_below}, key=lambda n: gm[n]), gm))
+        sets.MarkSetCount = len(sets.Coverage)
+        advv = {}
+        sts = []
+        for (t, N, extra), ls in sorted(tn_rules.items()):
+            if extra not in advv:
+                st0 = otl.buildSinglePosSubtable({n: otl.buildValue({'XAdvance': extra}) for n in finals}, gm)
+                advv[extra] = len(lookups)
+                lookups.append(otl.buildLookup([st0], flags=0))
             st = ot.ChainContextPos()
             st.Format = 3
-            st.BacktrackGlyphCount = 1
-            st.BacktrackCoverage = [otl.buildCoverage(sorted(gl, key=lambda n: gm[n]), gm)]
-            st.InputGlyphCount = len(seq)
-            st.InputCoverage = [otl.buildCoverage([c[x]], gm) for x in seq]
+            st.BacktrackGlyphCount = 0
+            st.BacktrackCoverage = []
+            st.InputGlyphCount = 3
+            st.InputCoverage = [otl.buildCoverage(sorted(ls, key=lambda n: gm[n]), gm),
+                                otl.buildCoverage([c[t]], gm), otl.buildCoverage([N], gm)]
             st.LookAheadGlyphCount = 0
             st.LookAheadCoverage = []
-            recs = []
-            for i, x in enumerate(seq):
-                d = sh.get(x, 0)
-                if d:
-                    r = ot.PosLookupRecord()
-                    r.SequenceIndex = i
-                    r.LookupListIndex = shift_lookup(d)
-                    recs.append(r)
-            st.PosLookupRecord = recs
-            st.PosCount = len(recs)
+            r = ot.PosLookupRecord()
+            r.SequenceIndex = 2
+            r.LookupListIndex = advv[extra]
+            st.PosLookupRecord = [r]
+            st.PosCount = 1
             sts.append(st)
-        if sts:
-            members = {c[x] for x in vs + ts}
-            if side == 'above':
-                members |= {c[x] for x in DOTS if x in c}
-            cov = otl.buildCoverage(sorted(members, key=lambda n: gm[n]), gm)
-            sets.Coverage.append(cov)
-            sets.MarkSetCount = len(sets.Coverage)
-            ctx_lookups.append(len(lookups))
-            lookups.append(otl.buildLookup(sts, flags=0x10, markFilterSet=len(sets.Coverage) - 1))
+        tn_lookups.append(len(lookups))
+        lookups.append(otl.buildLookup(sts, flags=0x10, markFilterSet=len(sets.Coverage) - 1))
     # neighbouring letters whose below-vowels would touch: widen the second letter's advance
     # (HarfBuzz zeroes mark advances after GPOS, and in RTL a letter's advance spaces it from the
     # letter drawn after it, i.e. the logically earlier one)
@@ -933,7 +1065,7 @@ def build_gpos(font, new_marks):
     gpos.LookupList.LookupCount = len(lookups)
     for fr in gpos.FeatureList.FeatureRecord:
         if fr.FeatureTag == 'mark':
-            fr.Feature.LookupListIndex += [i_mb] + ctx_lookups + adv_lookups
+            fr.Feature.LookupListIndex += [i_mb] + ctx_lookups + adv_lookups + tn_lookups
             fr.Feature.LookupCount = len(fr.Feature.LookupListIndex)
         elif fr.FeatureTag == 'mkmk':
             fr.Feature.LookupListIndex.append(i_mm)
@@ -1005,6 +1137,15 @@ def build(style, wght, wclass):
     # hhea/typo stay 900/-300 so line spacing matches the other bundled fonts.
     font['OS/2'].usWinAscent, font['OS/2'].usWinDescent = 1200, 760
     path = '%s/Mekorot-%s.ttf' % (OUT, style)
+    k = float(os.environ.get('GLYPH_SCALE', '0.9'))
+    if k != 1:
+        # smaller letters inside the same em; line metrics scale with the em so line spacing is unchanged
+        font['head'].unitsPerEm = round(font['head'].unitsPerEm / k)
+        o, h = font['OS/2'], font['hhea']
+        for obj, names in ((o, ('sTypoAscender', 'sTypoDescender', 'sTypoLineGap', 'usWinAscent', 'usWinDescent')),
+                           (h, ('ascent', 'descent', 'lineGap'))):
+            for nme in names:
+                setattr(obj, nme, round(getattr(obj, nme) / k))
     font.save(path)
     print('built', path, 'new marks:', len(new_marks))
 
