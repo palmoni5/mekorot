@@ -108,10 +108,13 @@ def shift_glyph_x(font, name, dx):
     g.recalcBounds(font['glyf'])
 
 
-DOT_D = 130            # one diameter for the period and the dots of niqqud and te'amim
-PERIOD_SCALE = DOT_D / 122.0
+DOT_D = 86             # diameter of the dots of niqqud and te'amim
+PERIOD_D = 124         # the period
+PERIOD_SCALE = PERIOD_D / 122.0
+QAMATS_HEIGHT = 0.80    # vertical scale of the qamats (kept hanging from its top)
+PATAH_THIN = 0.80      # vertical scale of the patah bar
 SEMICOLON_RAISE = 50    # upper dot of the semicolon started too low
-NARROW_VOWELS = {0x5b7: 0.72, 0x5b8: 0.72}   # patah, qamats were wider than most letters
+NARROW_VOWELS = {0x5b7: 0.64, 0x5b8: 0.64}   # patah, qamats were wider than most letters
 
 
 DOT_GAP = 34
@@ -180,7 +183,25 @@ def resize_punct_and_vowels(font):
         v = glyf[c[cp]]
         v.recalcBounds(glyf)
         xm = (v.xMin + v.xMax) / 2
-        v.coordinates = GlyphCoordinates([(round(xm + (x - xm) * k), y) for x, y in v.coordinates])
+        ym = (v.yMin + v.yMax) / 2
+        ky = PATAH_THIN if cp == 0x5b7 else 1.0
+        if cp == 0x5b8:
+            # same waist in the qamats bar: straighten it, then shorten the whole sign from its top
+            half = (v.xMax - v.xMin) / 2
+            v.coordinates = GlyphCoordinates(
+                [(x, (v.yMax if y > v.yMax - 40 else v.yMax - 76)
+                  if (v.yMax - 80 <= y <= v.yMax + 5 and abs(x - xm) <= 0.75 * half) else y)
+                 for x, y in v.coordinates])
+            ym, ky = v.yMax, QAMATS_HEIGHT
+        if cp == 0x5b7:
+            # the bar has a concave waist that reads as a notch at small sizes: make both edges straight
+            half = (v.xMax - v.xMin) / 2
+            v.coordinates = GlyphCoordinates(
+                [(x, v.yMax if (y > ym and abs(x - xm) <= 0.75 * half)
+                  else v.yMin if (y < ym and abs(x - xm) <= 0.75 * half) else y)
+                 for x, y in v.coordinates])
+        v.coordinates = GlyphCoordinates(
+            [(round(xm + (x - xm) * k), round(ym + (y - ym) * ky)) for x, y in v.coordinates])
         v.recalcBounds(glyf)
 
 
@@ -275,10 +296,11 @@ def glyph_bounds(font, name):
 
 
 TEAMIM_SCALE = 1.55
+TEAMIM_EXTRA_WGHT = 130   # te'amim are lighter than before (+250) to sit better with the letters
 BELOW_VOWELS = [0x5b0, 0x5b1, 0x5b2, 0x5b3, 0x5b4, 0x5b5, 0x5b6, 0x5b7, 0x5b8, 0x5bb, 0x5c7]
 ABOVE_VOWELS = [0x5b9, 0x5ba]
 REL_X = {0x5b9: 0.22, 0x5ba: 0.22, 0x5bb: 0.42, 0x5bd: 0.30}
-HOLAM_ON_LAMED = -0.25   # holam sits up-left of the lamed's ascender
+HOLAM_ON_LAMED = -0.20   # holam sits left of the lamed's ascender, at the normal vowel height
 DOTS = [0x5c1, 0x5c2]
 SHIN = 'uni05E9'
 LEVEL_TOP = 700          # normal letters share one height level above
@@ -427,7 +449,7 @@ def scale_glyph(font, name, k):
 
 
 def add_marks(font, wght):
-    noto = noto_instance(wght + 250)
+    noto = noto_instance(wght + TEAMIM_EXTRA_WGHT)
     c = font.getBestCmap()
     spacing = {0x5c0, 0x5c6}
     new_marks = []
@@ -608,7 +630,8 @@ def build_gpos(font, new_marks):
             b = lb[n]
             r_eff = HOLAM_ON_LAMED if (n == 'uni05DC' and rel == REL_X[0x5b9]) else rel
             x = round(b[0] + r_eff * (b[2] - b[0]))
-            bases[n] = {CID['above']: otl.buildAnchor(x, level_above(b)),
+            ya = LEVEL_TOP + ABOVE_GAP if r_eff != rel else level_above(b)
+            bases[n] = {CID['above']: otl.buildAnchor(x, ya),
                         CID['below']: otl.buildAnchor(x, level_below(b))}
         subtables.append(otl.buildMarkBasePosSubtable(mk, bases, gm))
     # te'amim: same height on every letter, nudged sideways only to clear the letter's own ink
@@ -700,6 +723,8 @@ def build_gpos(font, new_marks):
             rel = HOLAM_ON_LAMED
         vx = round(lbb[0] + rel * (lbb[2] - lbb[0]))
         if side == 'above':
+            if rel != REL_X.get(v, 0.5):
+                return bbox_at(bv, vx, LEVEL_TOP + ABOVE_GAP)
             return bbox_at(bv, vx, level_above(lbb))
         return bbox_at(bv, vx, level_below(lbb) - (bv[3] - bv[1]))
 
