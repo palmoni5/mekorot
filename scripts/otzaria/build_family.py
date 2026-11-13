@@ -108,9 +108,53 @@ def shift_glyph_x(font, name, dx):
     g.recalcBounds(font['glyf'])
 
 
-PERIOD_SCALE = 1.28     # the period read too small next to the letters
+DOT_D = 130            # one diameter for the period and the dots of niqqud and te'amim
+PERIOD_SCALE = DOT_D / 122.0
 SEMICOLON_RAISE = 50    # upper dot of the semicolon started too low
-NARROW_VOWELS = {0x5b7: 0.88, 0x5b8: 0.88}   # patah, qamats were wider than most letters
+NARROW_VOWELS = {0x5b7: 0.72, 0x5b8: 0.72}   # patah, qamats were wider than most letters
+
+
+DOT_GAP = 34
+DOT_VOWELS = [0x5b0, 0x5b1, 0x5b2, 0x5b3, 0x5b4, 0x5b5, 0x5b6, 0x5b9, 0x5ba, 0x5c1, 0x5c2]
+
+
+def unify_dots(font, name, d=DOT_D):
+    """Resize every round dot contour of a glyph to diameter d (keeping centres, pushing apart if they would touch)."""
+    glyf = font['glyf']
+    g = glyf[name]
+    if g.numberOfContours <= 0:
+        return
+    coords, ends = g.coordinates, g.endPtsOfContours
+    spans, start = [], 0
+    for e in ends:
+        spans.append((start, e))
+        start = e + 1
+    dots = []
+    for a, b in spans:
+        xs = [coords[i][0] for i in range(a, b + 1)]
+        ys = [coords[i][1] for i in range(a, b + 1)]
+        w, h = max(xs) - min(xs), max(ys) - min(ys)
+        if 50 <= w <= 160 and 50 <= h <= 160 and 0.75 <= w / h <= 1.33:
+            dots.append((a, b, (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, (w + h) / 2))
+    if not dots:
+        return
+    cx = sum(x[2] for x in dots) / len(dots)
+    cy = sum(x[3] for x in dots) / len(dots)
+    f = 1.0
+    for i in range(len(dots)):
+        for j in range(i + 1, len(dots)):
+            dist = ((dots[i][2] - dots[j][2]) ** 2 + (dots[i][3] - dots[j][3]) ** 2) ** 0.5
+            if dist < d + DOT_GAP:
+                f = max(f, (d + DOT_GAP) / max(dist, 1))
+    pts = list(coords)
+    for a, b, x0, y0, dia in dots:
+        k = d / dia
+        nx, ny = cx + (x0 - cx) * f, cy + (y0 - cy) * f
+        for i in range(a, b + 1):
+            px, py = pts[i]
+            pts[i] = (round(nx + (px - x0) * k), round(ny + (py - y0) * k))
+    g.coordinates = GlyphCoordinates(pts)
+    g.recalcBounds(glyf)
 
 
 def resize_punct_and_vowels(font):
@@ -129,6 +173,9 @@ def resize_punct_and_vowels(font):
             if comp.glyphName == c[0x2e]:
                 comp.y += SEMICOLON_RAISE
         sc.recalcBounds(glyf)
+    for cp in DOT_VOWELS:
+        if cp in c:
+            unify_dots(font, c[cp])
     for cp, k in NARROW_VOWELS.items():
         v = glyf[c[cp]]
         v.recalcBounds(glyf)
@@ -240,7 +287,7 @@ LEVEL_BASE = -30         # ... and one level below
 
 VOWEL_GAP = 40      # minimum gap between below-vowels of neighbouring letters
 INK_PAD = 30       # clearance between a mark and the letter's own ink
-ROUND_R = 44        # corner radius of the Noto-derived marks, in font units
+ROUND_R = 60        # corner radius of the Noto-derived marks, in font units
 ROUND_MIN_ANGLE = 30
 
 
@@ -396,6 +443,7 @@ def add_marks(font, wght):
         if cp in c or ('uni%04X' % cp) in font['glyf']:
             scale_glyph(font, font.getBestCmap().get(cp) or 'uni%04X' % cp, TEAMIM_SCALE)
     for n in new_marks:
+        unify_dots(font, n)
         round_corners(font, n)
     return new_marks
 
