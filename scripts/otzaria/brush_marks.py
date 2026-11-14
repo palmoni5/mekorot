@@ -11,6 +11,7 @@ stretched to the box of the glyph it replaces, so mark positioning keeps working
 import math
 
 from fontTools.pens.ttGlyphPen import TTGlyphPen
+import shapely
 from shapely import affinity
 from shapely.geometry import Point, Polygon
 from shapely.geometry.polygon import orient
@@ -18,6 +19,7 @@ from shapely.ops import unary_union
 
 TEAM_D = 54.0        # stroke diameter of the te'amim at Regular weight
 DOT_D = 86.0         # dots inside te'amim (same as the niqqud dots)
+GRID = 0.01          # outlines are snapped to this grid before they are simplified
 SIMPLIFY = 0.9
 
 
@@ -218,7 +220,11 @@ def meteg(w, h):
 # ---------- geometry -> glyph ----------
 def to_glyph(geom):
     """Shapely geometry -> TrueType glyph of smooth quadratic contours."""
-    geom = geom.simplify(SIMPLIFY)
+    # The outline must not depend on the machine: buffers and unions differ in the last bits
+    # between platforms, which is enough to change what the simplification keeps. Snapping to a
+    # fixed grid and starting every ring at a canonical vertex removes that.
+    geom = shapely.set_precision(geom, GRID).normalize()
+    geom = shapely.set_precision(geom.simplify(SIMPLIFY), GRID).normalize()
     polys = [geom] if geom.geom_type == 'Polygon' else list(geom.geoms)
     pen = TTGlyphPen(None)
     for p in polys:
