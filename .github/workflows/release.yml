@@ -1,0 +1,69 @@
+name: Build and release the Otzaria family
+
+# Pushing a tag builds the six static weights from the sources in this repository and
+# publishes them as a release named after the tag.
+# A manual run only builds, and keeps the fonts as a workflow artifact.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install build dependencies
+        run: pip install fonttools==4.68.0 shapely==2.2.0 numpy pillow uharfbuzz
+      - name: The package version must match the tag
+        if: github.ref_type == 'tag'
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have="$(sed -n 's/^version: *//p' package/pubspec.yaml | tr -d '\r')"
+          if [ "$want" != "$have" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but package/pubspec.yaml says $have"
+            exit 1
+          fi
+      - name: Build
+        run: |
+          mkdir -p out
+          python scripts/otzaria/build_family.py "fonts/variable/Mekorot[wght].ttf" \
+            sources/otzaria/NotoRashiHebrew-VariableFont_wght.ttf out
+          ls -l out
+          test "$(ls out/Mekorot-*.ttf | wc -l)" -eq 6
+      - name: Compare with the fonts committed for the Flutter package
+        run: |
+          # the app takes the fonts from package/lib at the tagged commit, not from the release
+          for f in out/Mekorot-*.ttf; do
+            n="$(basename "$f")"
+            if cmp -s "$f" "package/lib/$n"; then
+              echo "$n: identical to package/lib"
+            else
+              echo "::warning::$n differs from package/lib/$n (the app uses the committed file)"
+            fi
+          done
+      - name: Zip
+        run: |
+          cp OFL.txt out/
+          cd out && zip Mekorot-family.zip Mekorot-*.ttf OFL.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mekorot-family
+          path: out/
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" out/Mekorot-*.ttf out/Mekorot-family.zip out/OFL.txt --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
+              out/Mekorot-*.ttf out/Mekorot-family.zip out/OFL.txt
+          fi

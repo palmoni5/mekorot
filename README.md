@@ -55,6 +55,8 @@ Changes relative to upstream:
 
 Flutter package: `package/` (name `otzaria_mekorot`), consumed through a git dependency with `path: package`.
 
-Build: `python scripts/otzaria/build_family.py "fonts/variable/Mekorot[wght].ttf" NotoRashiHebrew-VariableFont_wght.ttf fonts/otzaria` (needs `fonttools`).
+Build: `python scripts/otzaria/build_family.py "fonts/variable/Mekorot[wght].ttf" sources/otzaria/NotoRashiHebrew-VariableFont_wght.ttf fonts/otzaria` (needs `fonttools`, `shapely`, `numpy`, `pillow`, `uharfbuzz`).
+
+Release: commit the built fonts to `fonts/otzaria` and `package/lib`, set the version in `package/pubspec.yaml`, then push a tag `vX.Y.Z`. The `release.yml` workflow rebuilds the family from the tag and publishes a release with that name.
 
 Licensed under the SIL Open Font License 1.1, see `OFL.txt`.
