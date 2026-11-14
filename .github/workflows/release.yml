@@ -40,14 +40,22 @@ jobs:
       - name: Compare with the fonts committed for the Flutter package
         run: |
           # the app takes the fonts from package/lib at the tagged commit, not from the release
-          for f in out/Mekorot-*.ttf; do
-            n="$(basename "$f")"
-            if cmp -s "$f" "package/lib/$n"; then
-              echo "$n: identical to package/lib"
-            else
-              echo "::warning::$n differs from package/lib/$n (the app uses the committed file)"
-            fi
-          done
+          python - <<'PY'
+          import glob, os
+          from fontTools.ttLib import TTFont
+          for path in sorted(glob.glob('out/Mekorot-*.ttf')):
+              name = os.path.basename(path)
+              a, b = TTFont(path), TTFont('package/lib/' + name)
+              # head only carries the build time and the checksum that follows from it
+              diff = [t for t in sorted(set(a.keys()) | set(b.keys()))
+                      if t not in ('GlyphOrder', 'head')
+                      and (t not in a or t not in b or a.getTableData(t) != b.getTableData(t))]
+              if diff:
+                  print('::warning::%s differs from package/lib in %s (the app uses the committed file)'
+                        % (name, ', '.join(diff)))
+              else:
+                  print(name + ': same as package/lib')
+          PY
       - name: Zip
         run: |
           cp OFL.txt out/
