@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install build dependencies
-        run: pip install fonttools==4.68.0 shapely==2.2.0 numpy pillow uharfbuzz
+        run: pip install fonttools==4.68.0 shapely==2.2.0 numpy==2.5.4 pillow==13.0.0 uharfbuzz==0.57.0
       - name: The package version must match the tag
         if: github.ref_type == 'tag'
         run: |
@@ -53,6 +53,24 @@ jobs:
               if diff:
                   print('::warning::%s differs from package/lib in %s (the app uses the committed file)'
                         % (name, ', '.join(diff)))
+                  # how far apart: outlines, advances
+                  moved, worst, other = 0, 0, []
+                  for g in a.getGlyphOrder():
+                      if g not in b['glyf'].glyphs:
+                          other.append(g)
+                          continue
+                      ga, gb = a['glyf'][g], b['glyf'][g]
+                      if ga.numberOfContours <= 0 or gb.numberOfContours <= 0:
+                          continue
+                      ca, cb = list(ga.coordinates), list(gb.coordinates)
+                      if len(ca) != len(cb):
+                          other.append(g)
+                      elif ca != cb:
+                          moved += 1
+                          worst = max(worst, max(max(abs(p[0] - q[0]), abs(p[1] - q[1])) for p, q in zip(ca, cb)))
+                  adv = [g for g in a.getGlyphOrder() if g in b['hmtx'].metrics and a['hmtx'][g][0] != b['hmtx'][g][0]]
+                  print('  outlines moved: %d glyphs, by at most %d units; different point count: %s; advances: %s'
+                        % (moved, worst, other[:12], adv[:12]))
               else:
                   print(name + ': same as package/lib')
           PY
