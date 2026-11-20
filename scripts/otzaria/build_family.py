@@ -334,6 +334,8 @@ ABOVE_VOWELS = [0x5b9, 0x5ba]
 REL_X = {0x5b9: 0.22, 0x5ba: 0.22, 0x5bb: 0.42, 0x5bd: 0.30}
 HOLAM_ON_LAMED = -0.20   # holam sits left of the lamed's ascender, at the normal vowel height
 KAF_ARM_GAP = 130  # final kaf: gap between its arm and the vowel inside
+KAF_DAGESH_GAP = 55  # final kaf with dagesh: the vowel drops under the dagesh, this far below it
+DAGESH = 0x5bc
 HOLAM_BY_LETTER = {'uni05DC': HOLAM_ON_LAMED, 'uni05D0': 0.0}   # alef: over the upper-left yod
 DOTS = [0x5c1, 0x5c2]
 SHIN = 'uni05E9'
@@ -595,8 +597,9 @@ def clear_dx(ink, cx, hw, y0, y1):
     return 0
 
 
-def dot_boxes(font):
-    """Boxes of the shin/sin dots on shin, as the font's own mark positioning places them."""
+def dot_boxes(font, base=0x5e9, dots=DOTS):
+    """Boxes of the shin/sin dots on shin (or other marks on another letter), as the font's own
+    mark positioning places them."""
     import io
     import uharfbuzz as hb
     buf = io.BytesIO()
@@ -604,9 +607,9 @@ def dot_boxes(font):
     hf = hb.Font(hb.Face(hb.Blob(buf.getvalue())))
     cm = font.getBestCmap()
     out = {}
-    for cp in DOTS:
+    for cp in dots:
         b = hb.Buffer()
-        b.add_str(chr(0x5e9) + chr(cp))
+        b.add_str(chr(base) + chr(cp))
         b.guess_segment_properties()
         hb.shape(hf, b, {})
         x = 0
@@ -754,6 +757,7 @@ def build_gpos(font, new_marks):
         return single[v]
 
     dot_box = dot_boxes(font)
+    kaf_dagesh = dot_boxes(font, 0x5da, [DAGESH]).get(DAGESH) if DAGESH in c else None
     GAP = MARK_GAP
     solved = {}
     stack_dy = {}
@@ -1412,12 +1416,41 @@ def build_gpos(font, new_marks):
                 sts.append(st)
         hol_lookups.append(len(lookups))
         lookups.append(otl.buildLookup(sts, flags=0x10, markFilterSet=len(sets.Coverage) - 1))
+    # final kaf with dagesh: the below-vowel sits in the hollow under the arm, where the dagesh
+    # is too, so the vowel drops below the dagesh (still inside the letter)
+    kaf_lookups = []
+    if kaf_dagesh:
+        dy = int((kaf_dagesh[1] - KAF_DAGESH_GAP - kaf_pos[1]) // 20) * 20   # vowel top = kaf_pos[1]
+        vn = sorted({c[v] for v in below_v}, key=lambda n: gm[n])
+        dn = [c[DAGESH]]
+        sets.Coverage.append(otl.buildCoverage(sorted(set(vn) | set(dn), key=lambda n: gm[n]), gm))
+        sets.MarkSetCount = len(sets.Coverage)
+        sts = []
+        # shapers differ on whether the dagesh comes before or after the vowel
+        for seq, vi in (([vn, dn], 0), ([dn, vn], 1)):
+            st = ot.ChainContextPos()
+            st.Format = 3
+            st.BacktrackGlyphCount = 1
+            st.BacktrackCoverage = [otl.buildCoverage([c[0x5da]], gm)]
+            st.InputGlyphCount = 2
+            st.InputCoverage = [otl.buildCoverage(x, gm) for x in seq]
+            st.LookAheadGlyphCount = 0
+            st.LookAheadCoverage = []
+            r = ot.PosLookupRecord()
+            r.SequenceIndex = vi
+            r.LookupListIndex = shift_lookup((0, dy))
+            st.PosLookupRecord = [r]
+            st.PosCount = 1
+            sts.append(st)
+        kaf_lookups.append(len(lookups))
+        lookups.append(otl.buildLookup(sts, flags=0x10, markFilterSet=len(sets.Coverage) - 1))
+        print('final kaf with dagesh: vowel dy', dy)
     gpos.LookupList.LookupCount = len(lookups)
     print('subtables: total', sum(len(l.SubTable) for l in lookups), 'ctx', sum(len(lookups[i].SubTable) for i in ctx_lookups),
           'adv', sum(len(lookups[i].SubTable) for i in adv_lookups) + n_inner, 'lookups', len(lookups))
     for fr in gpos.FeatureList.FeatureRecord:
         if fr.FeatureTag == 'mark':
-            fr.Feature.LookupListIndex += [i_mb] + ctx_lookups + hol_lookups + adv_lookups + tn_lookups
+            fr.Feature.LookupListIndex += [i_mb] + ctx_lookups + hol_lookups + kaf_lookups + adv_lookups + tn_lookups
             fr.Feature.LookupCount = len(fr.Feature.LookupListIndex)
         elif fr.FeatureTag == 'mkmk':
             fr.Feature.LookupListIndex.append(i_mm)
